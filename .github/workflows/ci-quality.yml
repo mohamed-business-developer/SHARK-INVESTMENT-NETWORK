@@ -1,0 +1,72 @@
+name: CI Quality & Secret Hygiene
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Typecheck, Lint, Format, Tests & Admin Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript strict typecheck
+        run: pnpm typecheck
+
+      - name: ESLint checks
+        run: pnpm lint
+
+      - name: Prettier format check
+        run: pnpm format:check
+
+      - name: Run unit and hygiene tests
+        run: pnpm test
+
+      - name: Verify i18n dictionary parity (ar/en)
+        run: pnpm i18n:check
+
+      - name: Verify no client secret exposure in mobile or public env templates
+        run: |
+          if grep -rn "SUPABASE_SERVICE_ROLE_KEY" apps/mobile/ ; then
+            echo "ERROR: SUPABASE_SERVICE_ROLE_KEY referenced in apps/mobile"
+            exit 1
+          fi
+          if grep -rnE "EXPO_PUBLIC_.*SERVICE_ROLE|NEXT_PUBLIC_.*SERVICE_ROLE" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=docs ; then
+            echo "ERROR: Service role key prefixed as public env var"
+            exit 1
+          fi
+
+      - name: Build Admin Next.js skeleton
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+          NEXT_PUBLIC_APP_ENV: development
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+          NEXT_PUBLIC_DEFAULT_LOCALE: ar
+        run: pnpm build:admin

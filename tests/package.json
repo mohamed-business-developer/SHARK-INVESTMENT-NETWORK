@@ -1,0 +1,25 @@
+{
+  "name": "@shark/tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "i18n:check": "vitest run i18n/parity.test.ts"
+  },
+  "dependencies": {
+    "@shark/design-tokens": "workspace:*",
+    "@shark/shared-types": "workspace:*",
+    "@shark/utils": "workspace:*",
+    "@shark/validation": "workspace:*"
+  },
+  "devDependencies": {
+    "@shark/config": "workspace:*",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.39.5",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

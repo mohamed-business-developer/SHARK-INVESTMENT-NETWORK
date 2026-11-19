@@ -1,0 +1,29 @@
+{
+  "name": "shark-investment-network",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SHARK Investment Network — Bilingual (Arabic RTL / English LTR) Investment Platform Monorepo",
+  "packageManager": "pnpm@10.16.1",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm -r --if-present lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}\"",
+    "test": "pnpm --filter @shark/tests test",
+    "i18n:check": "pnpm --filter @shark/tests i18n:check",
+    "mobile": "pnpm --filter @shark/mobile start",
+    "admin": "pnpm --filter @shark/admin dev",
+    "build:admin": "pnpm --filter @shark/admin build",
+    "clean": "pnpm -r --if-present clean"
+  },
+  "devDependencies": {
+    "@shark/config": "workspace:*",
+    "eslint": "^9.39.5",
+    "prettier": "^3.10.1",
+    "typescript": "~5.9.3"
+  }
+}

@@ -1,0 +1,108 @@
+name: Supabase Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - '.github/workflows/supabase-verify.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - '.github/workflows/supabase-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-supabase:
+    name: Validate Config, Migrations, Seeds, pgTAP & Edge Functions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Setup Deno for Edge Function Typechecking
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Verify Supabase configuration & Edge Function Deno checks
+        run: |
+          set -euo pipefail
+          test -f supabase/config.toml
+          supabase --version
+          deno --version
+          deno check --config supabase/functions/deno.json \
+            supabase/functions/_shared/*.ts \
+            supabase/functions/get-signed-document-url/index.ts \
+            supabase/functions/admin-user-action/index.ts \
+            supabase/functions/admin-review-entity/index.ts \
+            supabase/functions/send-push-notification/index.ts \
+            supabase/functions/delete-own-account/index.ts
+
+      - name: Start local Supabase stack, verify 8 migrations, seeds, and all 9 pgTAP suites
+        run: |
+          set -euo pipefail
+          supabase start
+          trap 'supabase stop || true' EXIT
+
+          supabase db reset
+
+          psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -v ON_ERROR_STOP=1 -c '
+            DO $$
+            DECLARE
+              v_migrations integer;
+              v_sectors integer;
+              v_settings integer;
+              v_fixtures integer;
+            BEGIN
+              SELECT count(*)::integer INTO v_migrations FROM supabase_migrations.schema_migrations;
+              SELECT count(*)::integer INTO v_sectors FROM public.sectors;
+              SELECT count(*)::integer INTO v_settings FROM public.system_settings;
+              SELECT count(*)::integer INTO v_fixtures FROM public.profiles WHERE email LIKE '\''%@shark.test'\'';
+
+              IF v_migrations <> 8 THEN
+                RAISE EXCEPTION '\''Expected 8 applied migrations, found %'\'', v_migrations;
+              END IF;
+              IF v_sectors <> 10 THEN
+                RAISE EXCEPTION '\''Expected 10 reference sectors, found %'\'', v_sectors;
+              END IF;
+              IF v_settings <> 4 THEN
+                RAISE EXCEPTION '\''Expected 4 reference system settings, found %'\'', v_settings;
+              END IF;
+              IF v_fixtures <> 8 THEN
+                RAISE EXCEPTION '\''Expected 8 synthetic test fixture profiles, found %'\'', v_fixtures;
+              END IF;
+            END $$;
+          '
+
+          SUITE_COUNT=$(find supabase/tests -maxdepth 1 -name '*.sql' | wc -l)
+          if [ "$SUITE_COUNT" -ne 9 ]; then
+            echo "Expected 9 pgTAP SQL test suites, found $SUITE_COUNT"
+            exit 1
+          fi
+
+          supabase test db \
+            supabase/tests/01_guest_isolation_sec01.sql \
+            supabase/tests/02_role_escalation_and_self_approval_sec02.sql \
+            supabase/tests/03_pending_and_rejected_gate_sec03_04.sql \
+            supabase/tests/04_suspended_revocation_sec05.sql \
+            supabase/tests/05_cross_tenant_idor_sec06.sql \
+            supabase/tests/06_restricted_pitch_and_docs_sec07.sql \
+            supabase/tests/07_storage_isolation_sec08.sql \
+            supabase/tests/08_founder_and_admin_boundaries_sec09_10.sql \
+            supabase/tests/09_audit_immutability_sec11.sql

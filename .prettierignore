@@ -1,0 +1,16 @@
+node_modules
+.pnpm-store
+.next
+.expo
+dist
+build
+out
+coverage
+pnpm-lock.yaml
+*.tsbuildinfo
+apps/mobile/android
+apps/mobile/ios
+supabase/.temp
+supabase/.branches
+AGENTS.md
+docs/*.md

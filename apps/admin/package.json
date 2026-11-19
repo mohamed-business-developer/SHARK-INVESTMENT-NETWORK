@@ -1,0 +1,48 @@
+{
+  "name": "@shark/admin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^7.0.7",
+    "@sentry/nextjs": "^11.15.0",
+    "@shark/design-tokens": "workspace:*",
+    "@shark/shared-types": "workspace:*",
+    "@shark/utils": "workspace:*",
+    "@shark/validation": "workspace:*",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.119.2",
+    "@tanstack/react-query": "^5.108.1",
+    "lucide-react": "^1.76.0",
+    "next": "^15.5.29",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-hook-form": "^7.92.0",
+    "server-only": "^0.0.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@next/eslint-plugin-next": "^15.5.29",
+    "@shark/config": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "~19.1.17",
+    "@types/react-dom": "~19.1.11",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.39.5",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^16.0.0",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.48.0"
+  }
+}
