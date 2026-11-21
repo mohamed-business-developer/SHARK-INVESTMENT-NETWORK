@@ -7,7 +7,10 @@ import { getValidatedAdminServerEnv } from '../env.server';
  */
 export function createAdminServiceClient(): SupabaseClient {
   const env = getValidatedAdminServerEnv();
-  return createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+  const projectUrl = env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
+
+  return createClient(projectUrl, serviceKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
