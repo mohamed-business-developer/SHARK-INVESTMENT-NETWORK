@@ -57,7 +57,7 @@ jobs:
             echo "ERROR: SUPABASE_SERVICE_ROLE_KEY referenced in apps/mobile"
             exit 1
           fi
-          if grep -rnE "EXPO_PUBLIC_.*SERVICE_ROLE|NEXT_PUBLIC_.*SERVICE_ROLE" . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=docs ; then
+          if grep -rnE "EXPO_PUBLIC_.*SERVICE_ROLE|NEXT_PUBLIC_.*SERVICE_ROLE" apps/ packages/ supabase/ .env.example --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.expo ; then
             echo "ERROR: Service role key prefixed as public env var"
             exit 1
           fi
