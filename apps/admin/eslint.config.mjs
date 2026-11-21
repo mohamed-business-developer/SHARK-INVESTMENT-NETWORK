@@ -49,7 +49,17 @@ export default [
         {
           patterns: [
             {
-              group: ['**/apps/mobile/**', '**/supabase/**', '@shark/mobile'],
+              group: [
+                '**/apps/mobile/**',
+                '**/supabase/functions/**',
+                '**/supabase/migrations/**',
+                '**/supabase/seeds/**',
+                '**/supabase/tests/**',
+                '../../**/supabase/**',
+                '../../../**/supabase/**',
+                'supabase/**',
+                '@shark/mobile',
+              ],
               message: 'Admin portal cannot import from mobile or supabase internals.',
             },
           ],

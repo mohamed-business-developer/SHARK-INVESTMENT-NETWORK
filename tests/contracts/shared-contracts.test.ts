@@ -15,7 +15,6 @@ import {
 import {
   adminReviewEntitySchema,
   adminUserActionSchema,
-  assertNoPublicSecretKeys,
   createPitchDocumentSchema,
   investorDirectoryFilterSchema,
   registerSchema,
@@ -24,6 +23,7 @@ import {
   upsertCompanySchema,
   upsertPitchSchema,
 } from '@shark/validation';
+import { assertNoPublicSecretKeys } from '@shark/validation/server-env';
 
 const SAMPLE_UUID_1 = '11111111-1111-4111-8111-111111111101';
 const SAMPLE_UUID_2 = '22222222-2222-4222-8222-222222222201';

@@ -1,12 +1,12 @@
 import 'server-only';
 import { AppDomainError } from '@shark/utils';
+import { emptyEnvToUndefined } from '@shark/validation';
 import {
   assertNoPublicSecretKeys,
-  emptyEnvToUndefined,
   parseAdminAllowedOriginsList,
   strictAdminServerEnvSchema,
   type StrictAdminServerEnv,
-} from '@shark/validation';
+} from '@shark/validation/server-env';
 
 export type RawAdminServerEnvInput = Record<string, string | undefined>;
 

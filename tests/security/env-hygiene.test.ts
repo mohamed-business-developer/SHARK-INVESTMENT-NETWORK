@@ -134,4 +134,25 @@ describe('Environment & client secret hygiene', () => {
     });
     expect(serverValid.allowedOrigins).toEqual(['http://localhost:3000', 'http://127.0.0.1:3000']);
   });
+
+  it('keeps @shark/validation client entrypoint free of server secret env schema keys', () => {
+    for (const relPath of [
+      'packages/validation/src/index.ts',
+      'packages/validation/src/env.schema.ts',
+    ]) {
+      const content = readFileSync(resolve(REPO_ROOT, relPath), 'utf8');
+      for (const secretName of [
+        'SUPABASE_SERVICE_ROLE_KEY',
+        'ADMIN_ALLOWED_ORIGINS',
+        'EXPO_ACCESS_TOKEN',
+        'SENTRY_AUTH_TOKEN',
+        'INTERNAL_EDGE_SECRET',
+      ]) {
+        expect(
+          content,
+          `Server secret identifier ${secretName} leaked into client barrel ${relPath}`,
+        ).not.toContain(secretName);
+      }
+    }
+  });
 });

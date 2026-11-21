@@ -9,6 +9,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./server-env": {
+      "types": "./src/env.server.schema.ts",
+      "default": "./src/env.server.schema.ts"
     }
   },
   "scripts": {

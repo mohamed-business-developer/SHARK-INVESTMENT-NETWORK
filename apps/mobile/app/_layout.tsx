@@ -1,24 +1,17 @@
 import { useEffect } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { ToastProvider } from '@/components/ui';
+import { AuthProvider } from '@/hooks/useAuth';
 import { LocaleProvider } from '@/i18n';
+import { mobileQueryClient } from '@/services/query-client';
 import { initMobileSentry } from '@/services/sentry';
 import { useSharkFonts } from '@/theme';
 
 SplashScreen.preventAutoHideAsync().catch(() => undefined);
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      staleTime: 30_000,
-    },
-  },
-});
 
 initMobileSentry();
 
@@ -37,13 +30,15 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <QueryClientProvider client={queryClient}>
-        <LocaleProvider>
-          <ToastProvider>
-            <StatusBar style="dark" />
-            <Stack screenOptions={{ headerShown: false }} />
-          </ToastProvider>
-        </LocaleProvider>
+      <QueryClientProvider client={mobileQueryClient}>
+        <AuthProvider>
+          <LocaleProvider>
+            <ToastProvider>
+              <StatusBar style="dark" />
+              <Stack screenOptions={{ headerShown: false }} />
+            </ToastProvider>
+          </LocaleProvider>
+        </AuthProvider>
       </QueryClientProvider>
     </SafeAreaProvider>
   );

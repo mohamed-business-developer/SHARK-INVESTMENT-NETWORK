@@ -3,6 +3,23 @@
     "title": "SHARK Investment Network — Admin Portal",
     "description": "Administration, compliance verification, and moderation portal for SHARK Investment Network"
   },
+  "auth": {
+    "brandBadge": "Restricted Admin Portal",
+    "loginTitle": "Administrator Sign In",
+    "loginSubtitle": "Access is restricted to approved administrators with active governance roles in SHARK Investment Network.",
+    "emailLabel": "Administrator Email",
+    "emailPlaceholder": "admin@shark.network",
+    "passwordLabel": "Password",
+    "passwordPlaceholder": "Enter your password",
+    "submitLogin": "Sign In",
+    "submittingLogin": "Verifying Security Context...",
+    "securityNotice": "Authentication, live profile status, and admin permission scopes are verified server-side on every protected request.",
+    "unauthorizedTitle": "Access Not Authorized",
+    "unauthorizedSubtitle": "This portal is restricted to approved, active administrator accounts.",
+    "unauthorizedBanner": "Access denied: your account is not an approved active administrator or lacks the required governance scope.",
+    "signOutAndReturn": "Sign Out & Return to Login",
+    "backToLogin": "Go to Sign In"
+  },
   "common": {
     "ar": "العربية",
     "en": "English",
