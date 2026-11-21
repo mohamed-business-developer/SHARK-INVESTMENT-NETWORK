@@ -68,7 +68,11 @@ describe('Phase 4 database, RLS, storage, and edge security guards', () => {
     }
 
     expect(migrationsSql).toContain(
-      'REVOKE SELECT (internal_notes) ON public.verification_requests FROM PUBLIC, anon, authenticated;',
+      'REVOKE SELECT ON TABLE public.verification_requests FROM PUBLIC, anon, authenticated;',
+    );
+    expect(migrationsSql).toContain('REVOKE ALL ON TABLE');
+    expect(migrationsSql).not.toMatch(
+      /GRANT SELECT \([\s\S]*?internal_notes[\s\S]*?\) ON public\.verification_requests/,
     );
     expect(migrationsSql).toContain('CREATE OR REPLACE VIEW public.public_investors_directory');
     expect(migrationsSql).toContain('CREATE OR REPLACE VIEW public.public_companies_directory');

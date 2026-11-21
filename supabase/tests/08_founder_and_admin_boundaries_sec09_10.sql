@@ -58,7 +58,7 @@ SELECT throws_ok(
 );
 
 SELECT throws_ok(
-  $$UPDATE public.companies SET verification_status = 'verified' WHERE id = '22222222-2222-4222-8222-222222222201'$$,
+  $$UPDATE public.companies SET verification_status = 'unverified' WHERE id = '22222222-2222-4222-8222-222222222201'$$,
   '42501',
   NULL,
   'SEC-10: companies:review admin without companies:verify cannot alter verification_status'

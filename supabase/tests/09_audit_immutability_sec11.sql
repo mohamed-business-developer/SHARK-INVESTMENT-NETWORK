@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap;
 SET LOCAL search_path TO extensions, public, auth, storage, pg_catalog;
 
-SELECT plan(6);
+SELECT plan(7);
 
 SELECT is(
   (SELECT count(*)
@@ -21,6 +21,12 @@ SELECT is(
   has_column_privilege('authenticated', 'public.verification_requests', 'internal_notes', 'SELECT'),
   false,
   'SEC-11: verification_requests.internal_notes is hidden from authenticated client SELECT'
+);
+
+SELECT is(
+  has_column_privilege('authenticated', 'public.verification_requests', 'review_notes', 'SELECT'),
+  true,
+  'SEC-11: verification_requests safe review_notes column remains readable to authenticated'
 );
 
 SELECT is(

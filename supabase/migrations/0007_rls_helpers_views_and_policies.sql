@@ -318,8 +318,51 @@ $$;
 REVOKE ALL ON FUNCTION public.get_public_system_flags() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_public_system_flags() TO anon, authenticated;
 
--- Column-level restriction: applicant & non-service authenticated sessions cannot select compliance internal_notes
-REVOKE SELECT (internal_notes) ON public.verification_requests FROM PUBLIC, anon, authenticated;
+-- Defense-in-depth table-level privilege lockdown for anon (19 private tables; public discovery uses views/sectors)
+REVOKE ALL ON TABLE
+  public.profiles,
+  public.investors,
+  public.founders,
+  public.companies,
+  public.company_members,
+  public.pitches,
+  public.pitch_documents,
+  public.pitch_reviews,
+  public.pitch_access_grants,
+  public.investment_interests,
+  public.portfolio_companies,
+  public.saved_items,
+  public.notifications,
+  public.device_tokens,
+  public.verification_requests,
+  public.admin_roles,
+  public.activity_logs,
+  public.system_settings,
+  public.support_requests
+FROM PUBLIC, anon;
+
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.sectors FROM PUBLIC, anon;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.activity_logs FROM authenticated;
+
+-- Column-level restriction: revoke full-table SELECT first (required in PostgreSQL to override default role grants)
+-- and grant SELECT on safe columns only, excluding internal_notes.
+REVOKE SELECT ON TABLE public.verification_requests FROM PUBLIC, anon, authenticated;
+GRANT SELECT (
+  id,
+  user_id,
+  company_id,
+  subject_type,
+  status,
+  storage_bucket,
+  document_paths,
+  submission_notes,
+  reviewer_id,
+  review_notes,
+  reviewed_at,
+  created_at,
+  updated_at,
+  deleted_at
+) ON public.verification_requests TO authenticated;
 
 -- ============================================================================
 -- 3. Enable & Force Row Level Security Across All 20 Tables
