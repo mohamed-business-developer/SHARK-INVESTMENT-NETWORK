@@ -61,6 +61,200 @@ export const edgeFunctionEnvSchema = z
   })
   .strict();
 
+const PLACEHOLDER_ENV_FRAGMENTS = [
+  'your-project-ref',
+  'your-public-anon-key',
+  'your-service-role-key',
+  'ci-placeholder',
+  'example.supabase.co',
+  'replace-me',
+  'changeme',
+] as const;
+
+export function emptyEnvToUndefined(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
+export function isPlaceholderEnvValue(value: string | undefined | null): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0) {
+    return false;
+  }
+  return PLACEHOLDER_ENV_FRAGMENTS.some((fragment) => normalized.includes(fragment));
+}
+
+function addHttpsIssueIfProduction(
+  env: z.infer<typeof appEnvironmentSchema>,
+  urlValue: string,
+  path: string[],
+  ctx: z.RefinementCtx,
+): void {
+  if (env === 'production' && !urlValue.toLowerCase().startsWith('https://')) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'validation.env.httpsRequired',
+      path,
+    });
+  }
+}
+
+function addPlaceholderIssueIfNeeded(value: string, path: string[], ctx: z.RefinementCtx): void {
+  if (isPlaceholderEnvValue(value)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'validation.env.placeholderValue',
+      path,
+    });
+  }
+}
+
+export function parseAdminAllowedOriginsList(
+  rawOrigins: string,
+  appEnv: z.infer<typeof appEnvironmentSchema>,
+): readonly string[] | null {
+  const parts = rawOrigins
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  const normalized = new Set<string>();
+  for (const entry of parts) {
+    if (entry === '*' || isPlaceholderEnvValue(entry)) {
+      return null;
+    }
+    if (!z.string().url().safeParse(entry).success) {
+      return null;
+    }
+    const originMatch = /^(https?):\/\/([^/?#@]+)(?:[/?#]|$)/i.exec(entry);
+    if (!originMatch || !originMatch[1] || !originMatch[2]) {
+      return null;
+    }
+    const protocol = originMatch[1].toLowerCase();
+    if (appEnv === 'production' && protocol !== 'https') {
+      return null;
+    }
+    normalized.add(`${protocol}://${originMatch[2].toLowerCase()}`);
+  }
+
+  return Array.from(normalized);
+}
+
+/**
+ * Fail-closed runtime schema for Mobile Supabase client initialization.
+ */
+export const strictMobilePublicEnvSchema = mobilePublicEnvSchema.superRefine((data, ctx) => {
+  addPlaceholderIssueIfNeeded(data.EXPO_PUBLIC_SUPABASE_URL, ['EXPO_PUBLIC_SUPABASE_URL'], ctx);
+  addPlaceholderIssueIfNeeded(
+    data.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+    ['EXPO_PUBLIC_SUPABASE_ANON_KEY'],
+    ctx,
+  );
+  addHttpsIssueIfProduction(
+    data.EXPO_PUBLIC_APP_ENV,
+    data.EXPO_PUBLIC_SUPABASE_URL,
+    ['EXPO_PUBLIC_SUPABASE_URL'],
+    ctx,
+  );
+});
+
+/**
+ * Fail-closed runtime schema for Admin browser/public Supabase client initialization.
+ */
+export const strictAdminPublicEnvSchema = adminPublicEnvSchema.superRefine((data, ctx) => {
+  addPlaceholderIssueIfNeeded(data.NEXT_PUBLIC_SUPABASE_URL, ['NEXT_PUBLIC_SUPABASE_URL'], ctx);
+  addPlaceholderIssueIfNeeded(
+    data.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    ['NEXT_PUBLIC_SUPABASE_ANON_KEY'],
+    ctx,
+  );
+  addPlaceholderIssueIfNeeded(data.NEXT_PUBLIC_SITE_URL, ['NEXT_PUBLIC_SITE_URL'], ctx);
+  addHttpsIssueIfProduction(
+    data.NEXT_PUBLIC_APP_ENV,
+    data.NEXT_PUBLIC_SUPABASE_URL,
+    ['NEXT_PUBLIC_SUPABASE_URL'],
+    ctx,
+  );
+  addHttpsIssueIfProduction(
+    data.NEXT_PUBLIC_APP_ENV,
+    data.NEXT_PUBLIC_SITE_URL,
+    ['NEXT_PUBLIC_SITE_URL'],
+    ctx,
+  );
+});
+
+/**
+ * Fail-closed runtime schema for Admin server-only operations & service-role access.
+ */
+export const strictAdminServerEnvSchema = adminPublicEnvSchema
+  .merge(adminServerEnvSchema)
+  .strict()
+  .superRefine((data, ctx) => {
+    addPlaceholderIssueIfNeeded(data.NEXT_PUBLIC_SUPABASE_URL, ['NEXT_PUBLIC_SUPABASE_URL'], ctx);
+    addPlaceholderIssueIfNeeded(
+      data.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      ['NEXT_PUBLIC_SUPABASE_ANON_KEY'],
+      ctx,
+    );
+    addPlaceholderIssueIfNeeded(data.NEXT_PUBLIC_SITE_URL, ['NEXT_PUBLIC_SITE_URL'], ctx);
+    addPlaceholderIssueIfNeeded(data.SUPABASE_SERVICE_ROLE_KEY, ['SUPABASE_SERVICE_ROLE_KEY'], ctx);
+    addHttpsIssueIfProduction(
+      data.NEXT_PUBLIC_APP_ENV,
+      data.NEXT_PUBLIC_SUPABASE_URL,
+      ['NEXT_PUBLIC_SUPABASE_URL'],
+      ctx,
+    );
+    addHttpsIssueIfProduction(
+      data.NEXT_PUBLIC_APP_ENV,
+      data.NEXT_PUBLIC_SITE_URL,
+      ['NEXT_PUBLIC_SITE_URL'],
+      ctx,
+    );
+
+    if (
+      data.SUPABASE_SERVICE_ROLE_KEY.trim() === data.NEXT_PUBLIC_SUPABASE_ANON_KEY.trim() &&
+      data.SUPABASE_SERVICE_ROLE_KEY.trim().length > 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'validation.env.serviceKeyMatchesAnonKey',
+        path: ['SUPABASE_SERVICE_ROLE_KEY'],
+      });
+    }
+
+    const parsedOrigins = parseAdminAllowedOriginsList(
+      data.ADMIN_ALLOWED_ORIGINS,
+      data.NEXT_PUBLIC_APP_ENV,
+    );
+    if (!parsedOrigins) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          data.NEXT_PUBLIC_APP_ENV === 'production' &&
+          data.ADMIN_ALLOWED_ORIGINS.toLowerCase().includes('http://')
+            ? 'validation.env.httpsRequired'
+            : 'validation.env.missingAllowedOrigins',
+        path: ['ADMIN_ALLOWED_ORIGINS'],
+      });
+    }
+  });
+
+export type StrictMobilePublicEnv = z.infer<typeof strictMobilePublicEnvSchema>;
+export type StrictAdminPublicEnv = z.infer<typeof strictAdminPublicEnvSchema>;
+export type StrictAdminServerEnv = z.infer<typeof strictAdminServerEnvSchema> & {
+  readonly allowedOrigins: readonly string[];
+};
+
 const FORBIDDEN_PUBLIC_KEY_FRAGMENTS = [
   'SERVICE_ROLE',
   'DB_URL',

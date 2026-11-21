@@ -114,7 +114,11 @@ export const revokePitchAccessSchema = z
 export const sendPushNotificationSchema = z
   .object({
     targetMode: z.enum(['user_ids', 'role', 'sector', 'all_approved']),
-    userIds: z.array(uuidSchema).min(1).max(500).optional(),
+    userIds: z
+      .array(uuidSchema)
+      .min(1, 'validation.notification.userIdsRequired')
+      .max(500, 'validation.notification.tooManyRecipients')
+      .optional(),
     role: z.enum(USER_ROLES).optional(),
     sectorId: uuidSchema.optional(),
     category: z.enum(NOTIFICATION_CATEGORIES),
@@ -150,6 +154,28 @@ export const sendPushNotificationSchema = z
       });
     }
   });
+
+export const directPushNotificationSchema = z
+  .object({
+    recipientIds: z
+      .array(uuidSchema)
+      .min(1, 'validation.notification.userIdsRequired')
+      .max(500, 'validation.notification.tooManyRecipients'),
+    category: z.enum(NOTIFICATION_CATEGORIES),
+    titleAr: boundedTextSchema(1, 160, 'validation.notification.title'),
+    titleEn: boundedTextSchema(1, 160, 'validation.notification.title'),
+    bodyAr: boundedTextSchema(1, 1000, 'validation.notification.body'),
+    bodyEn: boundedTextSchema(1, 1000, 'validation.notification.body'),
+    deepLink: safeRelativeDeepLinkSchema.optional(),
+    entityType: boundedTextSchema(1, 64, 'validation.entityType').optional(),
+    entityId: uuidSchema.optional(),
+  })
+  .strict();
+
+export const sendPushNotificationEdgeSchema = z.union([
+  sendPushNotificationSchema,
+  directPushNotificationSchema,
+]);
 
 export const upsertSectorSchema = z
   .object({

@@ -63,3 +63,38 @@ export async function persistLocale(
   }
   return safeLocale;
 }
+
+function lookupNestedString(root: unknown, key: string): string | null {
+  if (!key || typeof key !== 'string') {
+    return null;
+  }
+  const segments = key.split('.');
+  let current: unknown = root;
+  for (const segment of segments) {
+    if (
+      typeof current !== 'object' ||
+      current === null ||
+      Array.isArray(current) ||
+      !Object.prototype.hasOwnProperty.call(current, segment)
+    ) {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return typeof current === 'string' && current.length > 0 ? current : null;
+}
+
+/**
+ * Resolves a dot-delimited i18n message key (`errors.*` or `validation.*`) against a locale catalog,
+ * safely falling back to `fallbackKey` (`errors.unexpected`) when the key is missing or unsafe.
+ */
+export function resolveI18nMessageKey(
+  catalog: unknown,
+  key: string | null | undefined,
+  fallbackKey = 'errors.unexpected',
+  params?: Record<string, string | number>,
+): string {
+  const direct = key ? lookupNestedString(catalog, key) : null;
+  const resolved = direct ?? lookupNestedString(catalog, fallbackKey) ?? fallbackKey;
+  return interpolate(resolved, params);
+}

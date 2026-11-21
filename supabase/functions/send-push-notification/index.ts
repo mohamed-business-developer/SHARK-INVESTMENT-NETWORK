@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildCorsHeaders } from '../_shared/cors.ts';
 import {
   assertActiveAdminScope,
@@ -12,34 +13,276 @@ import { enforceRateLimit, hashIpAddress } from '../_shared/rate-limit.ts';
 import { parseJsonBody, uuidSchema } from '../_shared/validation.ts';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+const MAX_RECIPIENTS_PER_REQUEST = 500;
 
-const notificationSchema = z
+const NOTIFICATION_CATEGORIES = [
+  'account_status',
+  'verification',
+  'company_review',
+  'pitch_review',
+  'investment_interest',
+  'access_grant',
+  'announcement',
+  'security',
+] as const;
+
+const USER_ROLES = ['investor', 'founder', 'member', 'admin'] as const;
+
+function trimmedText(min: number, max: number, prefix: string): z.ZodString {
+  return z.string().trim().min(min, `${prefix}.tooShort`).max(max, `${prefix}.tooLong`);
+}
+
+const sharedNotificationFields = {
+  category: z.enum(NOTIFICATION_CATEGORIES),
+  titleAr: trimmedText(1, 160, 'validation.notification.title'),
+  titleEn: trimmedText(1, 160, 'validation.notification.title'),
+  bodyAr: trimmedText(1, 1000, 'validation.notification.body'),
+  bodyEn: trimmedText(1, 1000, 'validation.notification.body'),
+  deepLink: z
+    .string()
+    .trim()
+    .max(256, 'validation.deepLink.tooLong')
+    .regex(/^\/[a-zA-Z0-9/_-]*$/, 'validation.deepLink.invalidRelativePath')
+    .optional(),
+  entityType: trimmedText(1, 64, 'validation.entityType').optional(),
+  entityId: uuidSchema.optional(),
+};
+
+const targetModeNotificationSchema = z
   .object({
-    recipientIds: z.array(uuidSchema).min(1).max(500),
-    category: z.enum([
-      'account_status',
-      'verification',
-      'company_review',
-      'pitch_review',
-      'investment_interest',
-      'access_grant',
-      'announcement',
-      'security',
-    ]),
-    titleAr: z.string().trim().min(1).max(160),
-    titleEn: z.string().trim().min(1).max(160),
-    bodyAr: z.string().trim().min(1).max(1000),
-    bodyEn: z.string().trim().min(1).max(1000),
-    deepLink: z
-      .string()
-      .trim()
-      .max(256)
-      .regex(/^\/[a-zA-Z0-9/_-]*$/, 'validation.deepLink.invalidRelativePath')
+    targetMode: z.enum(['user_ids', 'role', 'sector', 'all_approved']),
+    userIds: z
+      .array(uuidSchema)
+      .min(1, 'validation.notification.userIdsRequired')
+      .max(MAX_RECIPIENTS_PER_REQUEST, 'validation.notification.tooManyRecipients')
       .optional(),
-    entityType: z.string().trim().min(1).max(64).optional(),
-    entityId: uuidSchema.optional(),
+    role: z.enum(USER_ROLES).optional(),
+    sectorId: uuidSchema.optional(),
+    ...sharedNotificationFields,
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.targetMode === 'user_ids' && (!data.userIds || data.userIds.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'validation.notification.userIdsRequired',
+        path: ['userIds'],
+      });
+    }
+    if (data.targetMode === 'role' && !data.role) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'validation.notification.roleRequired',
+        path: ['role'],
+      });
+    }
+    if (data.targetMode === 'sector' && !data.sectorId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'validation.notification.sectorRequired',
+        path: ['sectorId'],
+      });
+    }
+  });
+
+const directNotificationSchema = z
+  .object({
+    recipientIds: z
+      .array(uuidSchema)
+      .min(1, 'validation.notification.userIdsRequired')
+      .max(MAX_RECIPIENTS_PER_REQUEST, 'validation.notification.tooManyRecipients'),
+    ...sharedNotificationFields,
   })
   .strict();
+
+const notificationSchema = z.union([targetModeNotificationSchema, directNotificationSchema]);
+type ParsedNotificationPayload = z.infer<typeof notificationSchema>;
+type ResolvedTargetMode = 'direct' | 'user_ids' | 'role' | 'sector' | 'all_approved';
+
+interface TargetProfile {
+  readonly id: string;
+  readonly preferredLanguage: string;
+}
+
+function extractStringColumn(
+  rows: ReadonlyArray<Record<string, unknown>> | null,
+  key: string,
+): string[] {
+  const result: string[] = [];
+  for (const row of rows ?? []) {
+    const val = row[key];
+    if (typeof val === 'string' && val.length > 0) {
+      result.push(val);
+    }
+  }
+  return result;
+}
+
+function normalizeTargetProfiles(
+  rows: ReadonlyArray<Record<string, unknown>> | null,
+): TargetProfile[] {
+  const profiles: TargetProfile[] = [];
+  const seen = new Set<string>();
+  for (const row of rows ?? []) {
+    const id = row.id;
+    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    const pref = row.preferred_language;
+    profiles.push({
+      id,
+      preferredLanguage: typeof pref === 'string' && pref === 'en' ? 'en' : 'ar',
+    });
+  }
+  return profiles;
+}
+
+async function fetchApprovedSectorProfiles(
+  adminClient: SupabaseClient,
+  sectorId: string,
+): Promise<TargetProfile[]> {
+  const [profileRes, investorRes, founderRes, companyRes] = await Promise.all([
+    adminClient
+      .from('profiles')
+      .select('id')
+      .contains('interest_sector_ids', [sectorId])
+      .eq('account_status', 'approved')
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(MAX_RECIPIENTS_PER_REQUEST),
+    adminClient
+      .from('investors')
+      .select('user_id')
+      .contains('focus_sector_ids', [sectorId])
+      .is('deleted_at', null)
+      .order('user_id', { ascending: true })
+      .limit(MAX_RECIPIENTS_PER_REQUEST),
+    adminClient
+      .from('founders')
+      .select('user_id')
+      .eq('primary_sector_id', sectorId)
+      .is('deleted_at', null)
+      .order('user_id', { ascending: true })
+      .limit(MAX_RECIPIENTS_PER_REQUEST),
+    adminClient
+      .from('companies')
+      .select('owner_id')
+      .or(`sector_id.eq.${sectorId},secondary_sector_ids.cs.{${sectorId}}`)
+      .eq('status', 'approved')
+      .is('deleted_at', null)
+      .order('owner_id', { ascending: true })
+      .limit(MAX_RECIPIENTS_PER_REQUEST),
+  ]);
+
+  if (profileRes.error || investorRes.error || founderRes.error || companyRes.error) {
+    throw new EdgeFunctionError(500, 'PROFILE_LOOKUP_FAILED', 'errors.unexpected');
+  }
+
+  const candidateIds = Array.from(
+    new Set([
+      ...extractStringColumn(profileRes.data, 'id'),
+      ...extractStringColumn(investorRes.data, 'user_id'),
+      ...extractStringColumn(founderRes.data, 'user_id'),
+      ...extractStringColumn(companyRes.data, 'owner_id'),
+    ]),
+  ).sort();
+
+  if (candidateIds.length === 0) {
+    return [];
+  }
+
+  const collected: TargetProfile[] = [];
+  for (
+    let i = 0;
+    i < candidateIds.length && collected.length < MAX_RECIPIENTS_PER_REQUEST;
+    i += 100
+  ) {
+    const chunk = candidateIds.slice(i, i + 100);
+    const { data, error } = await adminClient
+      .from('profiles')
+      .select('id, preferred_language')
+      .in('id', chunk)
+      .eq('account_status', 'approved')
+      .is('deleted_at', null)
+      .order('id', { ascending: true });
+
+    if (error) {
+      throw new EdgeFunctionError(500, 'PROFILE_LOOKUP_FAILED', 'errors.unexpected');
+    }
+    for (const profile of normalizeTargetProfiles(data)) {
+      collected.push(profile);
+      if (collected.length >= MAX_RECIPIENTS_PER_REQUEST) {
+        break;
+      }
+    }
+  }
+
+  return collected;
+}
+
+async function resolveTargetProfiles(
+  adminClient: SupabaseClient,
+  payload: ParsedNotificationPayload,
+): Promise<{
+  readonly targetMode: ResolvedTargetMode;
+  readonly profiles: readonly TargetProfile[];
+}> {
+  if ('recipientIds' in payload || payload.targetMode === 'user_ids') {
+    const targetMode: ResolvedTargetMode = 'recipientIds' in payload ? 'direct' : 'user_ids';
+    const rawIds = 'recipientIds' in payload ? payload.recipientIds : (payload.userIds ?? []);
+    const uniqueIds = Array.from(new Set(rawIds)).slice(0, MAX_RECIPIENTS_PER_REQUEST);
+    if (uniqueIds.length === 0) {
+      return { targetMode, profiles: [] };
+    }
+    const { data, error } = await adminClient
+      .from('profiles')
+      .select('id, preferred_language')
+      .in('id', uniqueIds)
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(MAX_RECIPIENTS_PER_REQUEST);
+
+    if (error) {
+      throw new EdgeFunctionError(500, 'PROFILE_LOOKUP_FAILED', 'errors.unexpected');
+    }
+    return { targetMode, profiles: normalizeTargetProfiles(data) };
+  }
+
+  if (payload.targetMode === 'role' && payload.role) {
+    const { data, error } = await adminClient
+      .from('profiles')
+      .select('id, preferred_language')
+      .eq('role', payload.role)
+      .eq('account_status', 'approved')
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(MAX_RECIPIENTS_PER_REQUEST);
+
+    if (error) {
+      throw new EdgeFunctionError(500, 'PROFILE_LOOKUP_FAILED', 'errors.unexpected');
+    }
+    return { targetMode: 'role', profiles: normalizeTargetProfiles(data) };
+  }
+
+  if (payload.targetMode === 'sector' && payload.sectorId) {
+    const profiles = await fetchApprovedSectorProfiles(adminClient, payload.sectorId);
+    return { targetMode: 'sector', profiles };
+  }
+
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('id, preferred_language')
+    .eq('account_status', 'approved')
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(MAX_RECIPIENTS_PER_REQUEST);
+
+  if (error) {
+    throw new EdgeFunctionError(500, 'PROFILE_LOOKUP_FAILED', 'errors.unexpected');
+  }
+  return { targetMode: 'all_approved', profiles: normalizeTargetProfiles(data) };
+}
 
 function constantTimeEquals(a: string, b: string): boolean {
   const enc = new TextEncoder();
@@ -86,32 +329,25 @@ Deno.serve(async (req: Request) => {
     }
 
     const payload = await parseJsonBody(req, notificationSchema);
-    const uniqueRecipientIds = Array.from(new Set(payload.recipientIds));
+    const { targetMode, profiles: targetProfiles } = await resolveTargetProfiles(
+      adminClient,
+      payload,
+    );
 
-    const { data: validProfiles, error: profileErr } = await adminClient
-      .from('profiles')
-      .select('id, preferred_language')
-      .in('id', uniqueRecipientIds)
-      .is('deleted_at', null);
-
-    if (profileErr) {
-      throw new EdgeFunctionError(500, 'PROFILE_LOOKUP_FAILED', 'errors.unexpected');
-    }
-
-    const targetProfiles = validProfiles ?? [];
     if (targetProfiles.length === 0) {
       return jsonResponse(req, 200, {
         success: true,
         requestId,
+        targetMode,
         notificationsInserted: 0,
         pushAttempted: 0,
         tokensDeactivated: 0,
       });
     }
 
-    const targetIds = targetProfiles.map((p) => String(p.id));
+    const targetIds = targetProfiles.map((p) => p.id);
     const localeByUser = new Map<string, string>(
-      targetProfiles.map((p) => [String(p.id), String(p.preferred_language ?? 'ar')]),
+      targetProfiles.map((p) => [p.id, p.preferredLanguage]),
     );
 
     const notificationRows = targetIds.map((userId) => ({
@@ -211,24 +447,30 @@ Deno.serve(async (req: Request) => {
     }
 
     const ipHash = await hashIpAddress(req);
-    await insertAuditLog(adminClient, {
-      actor,
-      action: isInternalTrigger ? 'notifications.system_dispatched' : 'notifications.admin_sent',
-      entityType: 'notifications',
-      entityId: payload.entityId ?? null,
-      metadata: {
-        category: payload.category,
-        recipient_count: targetIds.length,
-        push_attempted: pushAttempted,
-        tokens_deactivated: unregisteredTokenIds.length,
-      },
-      requestId,
-      ipHash,
-    });
+    try {
+      await insertAuditLog(adminClient, {
+        actor,
+        action: isInternalTrigger ? 'notifications.system_dispatched' : 'notifications.admin_sent',
+        entityType: 'notifications',
+        entityId: payload.entityId ?? null,
+        metadata: {
+          category: payload.category,
+          target_mode: targetMode,
+          recipient_count: targetIds.length,
+          push_attempted: pushAttempted,
+          tokens_deactivated: unregisteredTokenIds.length,
+        },
+        requestId,
+        ipHash,
+      });
+    } catch {
+      throw new EdgeFunctionError(500, 'AUDIT_PERSISTENCE_FAILED', 'errors.auditWriteFailed');
+    }
 
     return jsonResponse(req, 200, {
       success: true,
       requestId,
+      targetMode,
       notificationsInserted: targetIds.length,
       pushAttempted,
       tokensDeactivated: unregisteredTokenIds.length,

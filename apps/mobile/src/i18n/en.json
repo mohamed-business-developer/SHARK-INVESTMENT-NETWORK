@@ -137,5 +137,299 @@
       "triggerGuestGate": "Preview Guest Gate",
       "toastTriggered": "Action completed and UI updated cleanly"
     }
+  },
+  "errors": {
+    "accountApprovalRequired": "Account approval is required before accessing this feature.",
+    "accountSuspended": "This account has been suspended. Please contact support for review.",
+    "adminActionFailed": "Failed to execute the requested administrative action.",
+    "adminCannotSelfDelete": "Administrator accounts cannot self-delete.",
+    "adminRequired": "Active administrator privileges are required for this action.",
+    "adminReviewFailed": "Failed to complete the entity review.",
+    "auditWriteFailed": "Mandatory audit trail entry could not be persisted; operation aborted safely.",
+    "cannotActOnSelf": "Administrators cannot perform this moderation action on their own account.",
+    "documentForbidden": "You do not have permission to access this confidential document.",
+    "documentNotFound": "The requested document was not found or is no longer active.",
+    "documentQuarantined": "This document is quarantined by security scanning and cannot be opened.",
+    "duplicateRecord": "This record already exists.",
+    "entityNotFound": "The requested entity was not found.",
+    "envMisconfigured": "Environment configuration is incomplete or invalid for secure startup.",
+    "forbidden": "You do not have permission to perform this action.",
+    "insufficientAdminScope": "Your administrator role lacks the required permission scope for this action.",
+    "invalidCredentials": "Invalid credentials provided.",
+    "invalidReference": "A referenced record associated with this request is invalid.",
+    "methodNotAllowed": "HTTP method is not allowed for this endpoint.",
+    "notFound": "The requested resource was not found.",
+    "originForbidden": "Request rejected because the request origin is not allowlisted.",
+    "ownershipTransferRequired": "You must transfer company ownership to another active member before deleting your account.",
+    "profileNotFound": "The user profile associated with this account was not found.",
+    "rateLimited": "Rate limit exceeded. Please wait before trying again.",
+    "unauthorized": "Authentication is required to continue.",
+    "unexpected": "An unexpected error occurred. Please try again.",
+    "validationFailed": "One or more input values failed validation."
+  },
+  "validation": {
+    "admin": {
+      "adminRoleRequired": "Please select an administrator role.",
+      "decision": {
+        "tooShort": "Decision note is too short.",
+        "tooLong": "Decision note exceeds the maximum allowed length."
+      },
+      "invalidDecision": "The selected review decision is invalid.",
+      "roleRequired": "Please specify the target account role."
+    },
+    "auth": {
+      "invalidSignupRole": "The selected role cannot be chosen during registration."
+    },
+    "bio": {
+      "tooShort": "Bio is too short.",
+      "tooLong": "Bio exceeds the maximum allowed length."
+    },
+    "city": {
+      "tooShort": "City name is too short.",
+      "tooLong": "City name exceeds the maximum allowed length."
+    },
+    "company": {
+      "bilingualNameRequired": "Please provide a company name in Arabic or English."
+    },
+    "companyName": {
+      "tooShort": "Company name is too short.",
+      "tooLong": "Company name exceeds the maximum allowed length."
+    },
+    "country": {
+      "invalidIso2": "Country code must be a 2-letter uppercase ISO-2 code."
+    },
+    "currency": {
+      "invalidIso3": "Currency code must be a 3-letter uppercase ISO-3 code."
+    },
+    "date": {
+      "invalidIsoDate": "Invalid ISO date format (YYYY-MM-DD).",
+      "invalidIsoDateTime": "Invalid ISO date-time format."
+    },
+    "deepLink": {
+      "invalid": "The provided deep link is invalid.",
+      "invalidRelativePath": "Deep link must be a valid relative application path starting with '/'.",
+      "tooLong": "Deep link exceeds the maximum allowed length."
+    },
+    "deleteAccount": {
+      "phrase": "Please type DELETE exactly to confirm account deletion."
+    },
+    "description": {
+      "tooShort": "Description is too short.",
+      "tooLong": "Description exceeds the maximum allowed length."
+    },
+    "document": {
+      "emptyFile": "Cannot upload an empty file.",
+      "invalidBucket": "Invalid storage bucket specified.",
+      "invalidCanonicalPath": "Document storage path does not match the canonical server layout.",
+      "invalidChecksum": "Invalid SHA-256 file checksum format.",
+      "maxSize10MB": "Verification documents must be 10 MB or smaller.",
+      "maxSize25MB": "Pitch documents must be 25 MB or smaller.",
+      "title": {
+        "tooShort": "Document title is too short.",
+        "tooLong": "Document title exceeds the maximum allowed length."
+      },
+      "unsupportedMime": "Unsupported file type or extension."
+    },
+    "email": {
+      "invalid": "Please enter a valid email address.",
+      "tooLong": "Email address exceeds the maximum allowed length."
+    },
+    "entityType": {
+      "tooShort": "Entity type is too short.",
+      "tooLong": "Entity type exceeds the maximum allowed length."
+    },
+    "env": {
+      "httpsRequired": "HTTPS URLs are required in production environments.",
+      "invalidSiteUrl": "Invalid public site URL.",
+      "invalidSupabaseUrl": "Invalid Supabase project URL.",
+      "missingAllowedOrigins": "Missing admin allowlisted origins configuration.",
+      "missingAnonKey": "Missing or invalid public anon key.",
+      "missingServiceRoleKey": "Missing or invalid server service role key.",
+      "placeholderValue": "Replace template placeholder values with valid runtime configuration.",
+      "serviceKeyMatchesAnonKey": "Service role key must not match the public anon key."
+    },
+    "experience": {
+      "integer": "Years of experience must be a whole number."
+    },
+    "feedback": {
+      "tooShort": "Feedback note is too short.",
+      "tooLong": "Feedback note exceeds the maximum allowed length."
+    },
+    "fileName": {
+      "noSeparators": "File name must not contain directory path separators.",
+      "tooShort": "File name is too short.",
+      "tooLong": "File name exceeds the maximum allowed length."
+    },
+    "firmName": {
+      "tooShort": "Firm name is too short.",
+      "tooLong": "Firm name exceeds the maximum allowed length."
+    },
+    "fullName": {
+      "tooShort": "Full name is too short.",
+      "tooLong": "Full name exceeds the maximum allowed length."
+    },
+    "geography": {
+      "tooShort": "Geography label is too short.",
+      "tooLong": "Geography label exceeds the maximum allowed length."
+    },
+    "headline": {
+      "tooShort": "Headline is too short.",
+      "tooLong": "Headline exceeds the maximum allowed length."
+    },
+    "iconName": {
+      "tooShort": "Icon name is too short.",
+      "tooLong": "Icon name exceeds the maximum allowed length."
+    },
+    "interest": {
+      "amountPositive": "Indicative investment amount must be greater than zero.",
+      "message": {
+        "tooShort": "Interest message is too short.",
+        "tooLong": "Interest message exceeds the maximum allowed length."
+      }
+    },
+    "investor": {
+      "invalidType": "Invalid investor type selected."
+    },
+    "jobTitle": {
+      "tooShort": "Job title is too short.",
+      "tooLong": "Job title exceeds the maximum allowed length."
+    },
+    "json": {
+      "invalid": "Invalid JSON request body."
+    },
+    "locale": {
+      "invalid": "Unsupported locale selected."
+    },
+    "notes": {
+      "tooShort": "Notes are too short.",
+      "tooLong": "Notes exceed the maximum allowed length."
+    },
+    "notification": {
+      "body": {
+        "tooShort": "Notification body is too short.",
+        "tooLong": "Notification body exceeds the maximum allowed length."
+      },
+      "roleRequired": "Please specify the target user role for this notification.",
+      "sectorRequired": "Please specify the target sector for this notification.",
+      "title": {
+        "tooShort": "Notification title is too short.",
+        "tooLong": "Notification title exceeds the maximum allowed length."
+      },
+      "tooManyRecipients": "Maximum recipient batch size is 500 users per request.",
+      "userIdsRequired": "Please specify at least one recipient user ID."
+    },
+    "password": {
+      "maxLength": "Password exceeds the maximum allowed length.",
+      "minLength": "Password must be at least 10 characters long.",
+      "requireDigitOrSymbol": "Password must include at least one digit or symbol.",
+      "requireLetter": "Password must include at least one letter.",
+      "required": "Password is required."
+    },
+    "payload": {
+      "invalid": "Request payload is invalid or contains unexpected fields."
+    },
+    "phone": {
+      "invalidE164": "Please enter a valid international phone number in E.164 format."
+    },
+    "pitch": {
+      "bilingualTitleRequired": "Please provide a pitch title in Arabic or English.",
+      "equityMax100": "Offered equity cannot exceed 100%.",
+      "equityPositive": "Offered equity must be greater than zero.",
+      "invalidFounderTransition": "Invalid founder pitch status transition.",
+      "minTicketExceedsTarget": "Minimum ticket cannot exceed the target raise amount.",
+      "raisePositive": "Target raise amount must be greater than zero.",
+      "section": {
+        "tooShort": "Section content is too short.",
+        "tooLong": "Section content exceeds the maximum allowed length."
+      },
+      "summary": {
+        "tooShort": "Pitch summary is too short.",
+        "tooLong": "Pitch summary exceeds the maximum allowed length."
+      },
+      "ticketPositive": "Minimum ticket must be greater than zero.",
+      "title": {
+        "tooShort": "Pitch title is too short.",
+        "tooLong": "Pitch title exceeds the maximum allowed length."
+      },
+      "valuationPositive": "Pre-money valuation must be greater than zero."
+    },
+    "portfolio": {
+      "nameOrCompanyRequired": "Please enter a portfolio company name or link an existing company."
+    },
+    "reason": {
+      "min10Required": "Please provide a reason of at least 10 characters for this action.",
+      "tooShort": "Reason is too short.",
+      "tooLong": "Reason exceeds the maximum allowed length."
+    },
+    "registrationNumber": {
+      "tooShort": "Registration number is too short.",
+      "tooLong": "Registration number exceeds the maximum allowed length."
+    },
+    "search": {
+      "query": {
+        "tooShort": "Search query is too short.",
+        "tooLong": "Search query exceeds the maximum allowed length."
+      }
+    },
+    "sector": {
+      "name": {
+        "tooShort": "Sector name is too short.",
+        "tooLong": "Sector name exceeds the maximum allowed length."
+      }
+    },
+    "sectors": {
+      "tooMany": "Selected sectors exceed the maximum allowed limit."
+    },
+    "setting": {
+      "invalidKey": "Invalid system setting key format."
+    },
+    "slug": {
+      "invalidFormat": "Slug must contain only lowercase letters, numbers, and hyphens.",
+      "tooShort": "Slug is too short.",
+      "tooLong": "Slug exceeds the maximum allowed length."
+    },
+    "storagePath": {
+      "invalid": "Invalid storage object path.",
+      "tooLong": "Storage path exceeds the maximum allowed length.",
+      "unsafeTraversal": "Unsafe path traversal characters are forbidden."
+    },
+    "summary": {
+      "tooShort": "Summary is too short.",
+      "tooLong": "Summary exceeds the maximum allowed length."
+    },
+    "support": {
+      "message": {
+        "tooShort": "Support message is too short.",
+        "tooLong": "Support message exceeds the maximum allowed length."
+      },
+      "subject": {
+        "tooShort": "Support subject is too short.",
+        "tooLong": "Support subject exceeds the maximum allowed length."
+      }
+    },
+    "tagline": {
+      "tooShort": "Tagline is too short.",
+      "tooLong": "Tagline exceeds the maximum allowed length."
+    },
+    "thesis": {
+      "tooShort": "Investment thesis is too short.",
+      "tooLong": "Investment thesis exceeds the maximum allowed length."
+    },
+    "ticket": {
+      "maxBelowMin": "Maximum ticket cannot be less than minimum ticket.",
+      "nonNegative": "Ticket amount must be zero or greater."
+    },
+    "url": {
+      "httpsRequired": "URL must begin with https://.",
+      "tooLong": "URL exceeds the maximum allowed length."
+    },
+    "uuid": {
+      "invalid": "Invalid UUID identifier format."
+    },
+    "verification": {
+      "companyIdMismatch": "Company verification requests must include the corresponding company ID.",
+      "documentRequired": "Please attach at least one verification document.",
+      "tooManyDocuments": "Number of uploaded documents exceeds the maximum limit."
+    }
   }
 }

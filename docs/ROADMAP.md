@@ -1,8 +1,8 @@
 # Delivery Roadmap & Implementation Breakdown — SHARK Investment Network
 
-> **Document Status:** Phase 1 Deliverable (Awaiting Stakeholder Review & Approval)  
+> **Document Status:** Active Delivery Roadmap (Phases 1–4 Approved; Phase 5 `M5.0` Authorized)  
 > **Owner:** Agent 1 — Product Architect & Lead Planner  
-> **Governing Charter:** `AGENTS.md` | **Product Spec:** `docs/PRD.md` | **Architecture:** `docs/ARCHITECTURE.md`  
+> **Governing Charter:** `AGENTS.md` | **Product Spec:** `docs/PRD.md` | **Architecture:** `docs/ARCHITECTURE.md` | **Phase 5 Plan:** `docs/PHASE_5_PLAN.md`
 
 ---
 
@@ -13,12 +13,12 @@ Per `AGENTS.md` Section 5, delivery follows nine disciplined phases with explici
 ```mermaid
 flowchart LR
     P0["Phase 0: Workspace Inspection (Done)"]
-    P1["Phase 1: Architecture & Planning (Gate: User Approval)"]
-    P2["Phase 2: Project Foundation (Monorepo & Tooling)"]
-    P3["Phase 3: Design System (Tokens, RTL/LTR & Primitives)"]
-    P4["Phase 4: Backend (Schema, RLS, Storage, Edge, Types)"]
-    P5["Phase 5: Mobile App (Auth First, Tabs, Sub-Screens)"]
-    P6["Phase 6: Admin Web (Auth/RBAC First, 13 Modules)"]
+    P1["Phase 1: Architecture & Planning (Approved)"]
+    P2["Phase 2: Project Foundation (Approved)"]
+    P3["Phase 3: Design System (Approved)"]
+    P4["Phase 4: Backend & Security CI (Approved)"]
+    P5["Phase 5: Backend Integration & App Services (M5.0 Authorized)"]
+    P6["Phase 6: Admin Web Dashboard UI (13 Modules)"]
     P7["Phase 7: End-to-End Integration (Cross-System Journeys)"]
     P8["Phase 8: QA, Security, Load Validation & Release"]
 
@@ -44,8 +44,8 @@ flowchart LR
 | **Phase 2** | Project Foundation | **Approved & Complete** | Initialize Git, `pnpm` workspace, shared configs, scaffold `apps/mobile`, `apps/admin`, `packages/*`, `supabase/`, CI workflows, `README.md`. | `pnpm install`, `pnpm typecheck`, and `pnpm lint` pass cleanly across all workspace shells. |
 | **Phase 3** | Design System | **Approved & Complete** | Establish `DESIGN_SYSTEM.md`, `@shark/design-tokens` (`#142B49`, `IBM Plex Sans Arabic`, `Inter`, 4px scale, `8/12/16px` radii), RTL helpers, and reusable UI primitives for Mobile & Admin. | WCAG AA contrast verified; RTL/LTR toggle verified on Mobile & Admin component showcases. |
 | **Phase 4** | Backend | **Approved (CI Verified)** | Implement PostgreSQL schema, triggers (`pending` default, block `admin` signup), RLS policies, private Storage buckets, 5 Edge Functions, seed fixtures, `@shark/shared-types` & `@shark/validation`. | Automated RLS/pgTAP (`72` assertions in 9 suites), Deno checks, and GitHub Actions CI passed; `DATABASE.md`, `API_DOCUMENTATION.md`, and `BACKEND_ARCHITECTURE.md` synchronized. |
-| **Phase 5** | Backend Integration & Application Services (`apps/mobile` + `apps/admin` Core) | **Planning Pending Approval** | Execute finalized [PHASE_5_PLAN.md](./PHASE_5_PLAN.md), [PHASE_5_TASKS.md](./PHASE_5_TASKS.md), and [PHASE_5_TEST_PLAN.md](./PHASE_5_TEST_PLAN.md): Mobile `SecureStore`/Auth/hooks/repositories/Storage/Push/Telemetry + Mobile routes composed from Phase 3 primitives, and Admin `@supabase/ssr` guards/Server Actions/repositories (13 Admin dashboard UI pages deferred to Phase 6). | All `M5.0`–`M5.6` unit, live Supabase integration, security, bilingual RTL/LTR, and build/CI exit gates pass cleanly. |
-| **Phase 6** | Admin Dashboard | Pending | Build Server-verified Admin Auth & RBAC shell first, followed by all 13 modules with full `activity_logs` auditing and bilingual UI. | Server-side RBAC blocks non-admins/sub-roles; all 13 modules pass typecheck, lint, and audit verification. |
+| **Phase 5** | Backend Integration & Application Services (`apps/mobile` + `apps/admin` Core) | **M5.0 Authorized** | Execute [PHASE_5_PLAN.md](./PHASE_5_PLAN.md), [PHASE_5_TASKS.md](./PHASE_5_TASKS.md), and [PHASE_5_TEST_PLAN.md](./PHASE_5_TEST_PLAN.md): Mobile `SecureStore`/Auth/repositories/hooks/Storage/Push/Telemetry + Mobile routes composed from Phase 3 primitives, and Admin `@supabase/ssr` guards/Server Actions/repositories (`13` Admin UI pages in Phase 6). | All `M5.0`–`M5.6` unit, live Supabase integration, security, bilingual RTL/LTR, and build/CI exit gates pass cleanly. |
+| **Phase 6** | Admin Web Dashboard UI (`apps/admin` 13 Modules) | Pending | Build Admin Portal UI screens for all 13 modules (`Overview` through `System Settings`) on top of Phase 5 `@supabase/ssr` Auth/RBAC guards, `server-only` repositories, and audited Server Actions. | Server-side RBAC blocks non-admins/sub-roles; all 13 modules pass typecheck, lint, RTL/LTR, and atomic audit verification. |
 | **Phase 7** | End-to-End Integration | Pending | Verify live cross-platform workflows connecting Mobile, Admin, Supabase Auth/DB/Storage/Edge/Realtime, and Push Notifications. | All 4 critical journeys pass end-to-end without mocks or manual DB workarounds. |
 | **Phase 8** | QA, Security & Release | Pending | Threat modeling, penetration & RLS verification, Signed URL leakage checks, bilingual RTL sweep, synthetic 1k companies / 10k users load testing, EAS Android/iOS & Next.js prod builds. | Zero Critical/High security findings; load metrics documented; Agent 6 final sign-off. |
 
@@ -108,10 +108,10 @@ Every implementation task below maps directly to the six specialized agents defi
 
 ---
 
-### Phase 5 — Mobile Application (`apps/mobile`)
+### Phase 5 — Backend Integration & Application Services (`apps/mobile` + `apps/admin` Core)
 
 > [!NOTE]
-> Mobile implementation MUST build and verify the **Auth & Onboarding Stack first** (`P5-01`–`P5-02`) before connecting Discovery, Directories, Pitches, and Account workflows.
+> Phase 5 aligns `apps/mobile` services/repositories/hooks and route wiring with `apps/admin` `@supabase/ssr` Triple-Gate guards and audited Server Actions per [PHASE_5_PLAN.md](./PHASE_5_PLAN.md). Mobile MUST verify Contracts (`M5.0`) and Auth & Admin Guards (`M5.1`) before directories, deals, or route screens (`M5.6`). Admin Dashboard 13-module UI remains strictly in Phase 6.
 
 | Task ID | Title & Scope | Owner (Reviewer) | Dependencies | Owned Files / Folders | Exit Criteria |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -128,7 +128,7 @@ Every implementation task below maps directly to the six specialized agents defi
 
 ---
 
-### Phase 6 — Admin Web Dashboard (`apps/admin`)
+### Phase 6 — Admin Web Dashboard UI (`apps/admin` 13 Modules)
 
 > [!NOTE]
 > Admin Auth & Server-Side RBAC (`P6-01`) MUST be verified before building any of the 13 modules. Every privileged mutation MUST write to `activity_logs`.

@@ -114,11 +114,23 @@ Creates bilingual in-app notification records and dispatches Expo Push notificat
 - **Authorization (Dual Mode):**
   - **Admin Caller:** Active admin triple-gate with `notifications:send` (`30` requests / `3600s` rate limit).
   - **Internal Backend Caller:** Constant-time comparison of `x-internal-service-key` against `INTERNAL_EDGE_SECRET` (`>= 16` chars).
-- **Request Body Constraints:**
-  - `recipientIds`: `1..500` valid UUIDs (deduplicated server-side).
-  - `category`: one of `account_status`, `verification`, `company_review`, `pitch_review`, `investment_interest`, `access_grant`, `announcement`, `security`.
-  - `deepLink`: optional safe relative path matching `^/[a-zA-Z0-9/_-]*$` (prevents open redirects).
-- **Push Delivery Hygiene:** Selects locale-specific copy (`ar`/`en`) per `profiles.preferred_language`, sends in batches of `100` to `https://exp.host/--/api/v2/push/send`, never logs token strings, and marks `DeviceNotRegistered` tokens `is_active = false`.
+- **Request Body Modes (`sendPushNotificationEdgeSchema`):**
+  - **Target-Mode Broadcast (`SendPushNotificationRequest`):**
+    - `targetMode`: `'user_ids' | 'role' | 'sector' | 'all_approved'`
+    - `userIds`: `1..500` UUIDs (required when `targetMode === 'user_ids'`)
+    - `role`: `'investor' | 'founder' | 'member' | 'admin'` (required when `targetMode === 'role'`; resolves approved non-deleted accounts up to `500` recipients)
+    - `sectorId`: sector UUID (required when `targetMode === 'sector'`; resolves approved non-deleted profiles, investors, founders, and approved company owners linked to that sector up to `500` recipients)
+    - `all_approved`: resolves approved non-deleted accounts bounded to `500` recipients per invocation
+  - **Direct Trigger (`SendDirectPushNotificationRequest`):**
+    - `recipientIds`: `1..500` valid UUIDs (deduplicated server-side; primarily for internal lifecycle triggers targeting explicit account IDs).
+  - **Shared Fields:**
+    - `category`: one of `account_status`, `verification`, `company_review`, `pitch_review`, `investment_interest`, `access_grant`, `announcement`, `security`.
+    - `titleAr`, `titleEn`: `1..160` trimmed characters.
+    - `bodyAr`, `bodyEn`: `1..1000` trimmed characters.
+    - `deepLink`: optional safe relative path matching `^/[a-zA-Z0-9/_-]*$` (prevents open redirects).
+- **Response (`200 OK`, `Cache-Control: no-store`):**
+  - Returns `{ success: true, requestId, targetMode, notificationsInserted, pushAttempted, tokensDeactivated }`.
+- **Push Delivery Hygiene:** Selects locale-specific copy (`ar`/`en`) per `profiles.preferred_language`, sends in batches of `100` to `https://exp.host/--/api/v2/push/send`, never logs token strings, marks `DeviceNotRegistered` tokens `is_active = false`, and fails closed (`500 AUDIT_PERSISTENCE_FAILED`) if the immutable `activity_logs` write fails.
 
 ---
 

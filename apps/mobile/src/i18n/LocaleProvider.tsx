@@ -11,7 +11,6 @@ import { I18nManager, Platform } from 'react-native';
 import * as Updates from 'expo-updates';
 import type { AppLocale } from '@shark/shared-types';
 import {
-  DEFAULT_LOCALE,
   getDirection,
   isRtlLocale,
   persistLocale,
@@ -19,16 +18,13 @@ import {
   type TextDirection,
 } from '@shark/utils';
 import { mobileEnv } from '@/services/env';
-import ar from './ar.json';
-import en from './en.json';
+import {
+  getMobileDirection,
+  getMobileTranslations,
+  mobileCatalogs,
+  type MobileTranslationCatalog,
+} from './catalog';
 import { mobileLocaleStorage } from './locale-storage';
-
-export type MobileTranslationCatalog = typeof ar;
-
-const catalogs: Record<AppLocale, MobileTranslationCatalog> = {
-  ar,
-  en,
-};
 
 export interface LocaleContextValue {
   readonly locale: AppLocale;
@@ -46,15 +42,7 @@ export interface LocaleContextValue {
 
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 
-export function getMobileTranslations(
-  locale: AppLocale = DEFAULT_LOCALE,
-): MobileTranslationCatalog {
-  return catalogs[locale];
-}
-
-export function getMobileDirection(locale: AppLocale = DEFAULT_LOCALE): TextDirection {
-  return getDirection(locale);
-}
+export { getMobileDirection, getMobileTranslations, type MobileTranslationCatalog };
 
 export function LocaleProvider({ children }: { readonly children: ReactNode }) {
   const fallbackLocale = mobileEnv.EXPO_PUBLIC_DEFAULT_LOCALE;
@@ -126,7 +114,7 @@ export function LocaleProvider({ children }: { readonly children: ReactNode }) {
       isRtl: isRtlLocale(locale),
       isReady,
       nativeReloadPending,
-      t: catalogs[locale],
+      t: mobileCatalogs[locale],
       setLocale,
       toggleLocale,
     };

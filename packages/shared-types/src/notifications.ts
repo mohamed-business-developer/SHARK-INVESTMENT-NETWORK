@@ -72,3 +72,27 @@ export interface SendPushNotificationRequest {
   readonly entityType?: string;
   readonly entityId?: string;
 }
+
+export interface SendDirectPushNotificationRequest {
+  readonly recipientIds: readonly string[];
+  readonly category: NotificationCategory;
+  readonly titleAr: string;
+  readonly titleEn: string;
+  readonly bodyAr: string;
+  readonly bodyEn: string;
+  readonly deepLink?: string;
+  readonly entityType?: string;
+  readonly entityId?: string;
+}
+
+export type SendPushNotificationPayload =
+  SendPushNotificationRequest | SendDirectPushNotificationRequest;
+
+export interface SendPushNotificationResponse {
+  readonly success: true;
+  readonly requestId: string;
+  readonly targetMode: NotificationTargetMode | 'direct';
+  readonly notificationsInserted: number;
+  readonly pushAttempted: number;
+  readonly tokensDeactivated: number;
+}

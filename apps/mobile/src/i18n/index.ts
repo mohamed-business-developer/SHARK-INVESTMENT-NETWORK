@@ -1,8 +1,7 @@
 export {
-  LocaleProvider,
   getMobileDirection,
   getMobileTranslations,
-  useLocale,
-  type LocaleContextValue,
+  resolveMobileMessage,
   type MobileTranslationCatalog,
-} from './LocaleProvider';
+} from './catalog';
+export { LocaleProvider, useLocale, type LocaleContextValue } from './LocaleProvider';

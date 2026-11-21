@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { EdgeFunctionError } from './errors.ts';
 
-export const uuidSchema = z.string().uuid();
+export const uuidSchema = z.string().uuid('validation.uuid.invalid');
 
 export const safeStoragePathSchema = z
   .string()
