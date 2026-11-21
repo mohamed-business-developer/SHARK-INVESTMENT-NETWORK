@@ -47,6 +47,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
     createInitialGuestAuthState({ status: 'loading' }),
   );
   const statusRef = useRef<MobileAuthState['status']>('loading');
+  const refreshSeqRef = useRef(0);
 
   useEffect(() => {
     statusRef.current = authState.status;
@@ -54,11 +55,16 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
 
   const refreshAuthState = useCallback(
     async (forcedReason?: RevokedAccessReason): Promise<MobileAuthState> => {
+      const seq = refreshSeqRef.current + 1;
+      refreshSeqRef.current = seq;
+
       const client = tryGetMobileSupabaseClient();
       if (!client) {
         const guest = createInitialGuestAuthState({ status: 'guest' });
-        statusRef.current = guest.status;
-        setAuthState(guest);
+        if (seq === refreshSeqRef.current) {
+          statusRef.current = guest.status;
+          setAuthState(guest);
+        }
         return guest;
       }
 
@@ -71,12 +77,17 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
         clearProtectedCache: () => {
           queryClient.clear();
         },
+        onBeforeRevokedSignOut: (nextState) => {
+          statusRef.current = nextState.status;
+        },
         localSignOut: () => repo.signOut(),
         forcedRevocationReason: forcedReason,
       });
 
-      statusRef.current = next.status;
-      setAuthState(next);
+      if (seq === refreshSeqRef.current) {
+        statusRef.current = next.status;
+        setAuthState(next);
+      }
       return next;
     },
     [queryClient],
@@ -99,6 +110,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
             return;
           }
           if (event === 'SIGNED_OUT') {
+            refreshSeqRef.current += 1;
             queryClient.clear();
             const fallbackStatus = statusRef.current === 'suspended' ? 'suspended' : 'guest';
             const nextGuest = createInitialGuestAuthState({
@@ -148,7 +160,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*',
           schema: 'public',
           table: 'profiles',
           filter: `id=eq.${userId}`,

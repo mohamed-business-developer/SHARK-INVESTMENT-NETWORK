@@ -24,7 +24,7 @@ export function isPublicAdminPath(
   return false;
 }
 
-function hasControlCharacters(value: string): boolean {
+function hasControlOrWhitespaceIssues(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
     if (code <= 0x1f || code === 0x7f) {
@@ -35,7 +35,7 @@ function hasControlCharacters(value: string): boolean {
 }
 
 /**
- * Prevents open redirects and self-redirect loops via strict single-leading-slash relative paths.
+ * Prevents open redirects, double-encoding bypasses, userinfo SSRF, and self-redirect loops.
  */
 export function sanitizeAdminRedirectPath(
   rawNext: string | null | undefined,
@@ -51,20 +51,43 @@ export function sanitizeAdminRedirectPath(
     !trimmed.startsWith('/') ||
     trimmed.startsWith('//') ||
     trimmed.includes('\\') ||
-    /%2e|%2f|%5c/i.test(trimmed) ||
-    hasControlCharacters(trimmed)
+    trimmed.includes('@') ||
+    /%2e|%2f|%5c|%25/i.test(trimmed) ||
+    hasControlOrWhitespaceIssues(trimmed)
   ) {
     return fallback;
   }
 
-  if (trimmed === '/login' || trimmed.startsWith('/login?') || trimmed === '/unauthorized') {
+  try {
+    const parsed = new URL(trimmed, 'https://admin.local');
+    if (
+      parsed.origin !== 'https://admin.local' ||
+      !parsed.pathname.startsWith('/') ||
+      parsed.pathname.startsWith('//')
+    ) {
+      return fallback;
+    }
+
+    const normalizedPath = parsed.pathname.toLowerCase();
+    if (
+      normalizedPath === '/login' ||
+      normalizedPath.startsWith('/login/') ||
+      normalizedPath === '/unauthorized' ||
+      normalizedPath.startsWith('/unauthorized/')
+    ) {
+      return fallback;
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
     return fallback;
   }
-
-  return trimmed;
 }
 
-function parseHttpOrigin(rawHeaderValue: string | null): string | null {
+function parseHttpOrigin(
+  rawHeaderValue: string | null,
+  options: { readonly allowPath: boolean },
+): string | null {
   if (!rawHeaderValue) {
     return null;
   }
@@ -74,7 +97,17 @@ function parseHttpOrigin(rawHeaderValue: string | null): string | null {
   }
   try {
     const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    if (
+      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+      parsed.username !== '' ||
+      parsed.password !== ''
+    ) {
+      return null;
+    }
+    if (
+      !options.allowPath &&
+      (parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '')
+    ) {
       return null;
     }
     return parsed.origin.toLowerCase();
@@ -99,9 +132,18 @@ export function validateAdminOriginHeaders(
     });
   }
 
+  const secFetchSite = requestHeaders.get('sec-fetch-site')?.trim().toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    throw new AppDomainError({
+      code: 'ORIGIN_FORBIDDEN',
+      messageKey: 'errors.originForbidden',
+      statusCode: 403,
+    });
+  }
+
   const originHeader = requestHeaders.get('origin');
   if (originHeader !== null) {
-    const parsedOrigin = parseHttpOrigin(originHeader);
+    const parsedOrigin = parseHttpOrigin(originHeader, { allowPath: false });
     if (!parsedOrigin || !normalizedAllowlist.has(parsedOrigin)) {
       throw new AppDomainError({
         code: 'ORIGIN_FORBIDDEN',
@@ -112,7 +154,7 @@ export function validateAdminOriginHeaders(
     return parsedOrigin;
   }
 
-  const refererOrigin = parseHttpOrigin(requestHeaders.get('referer'));
+  const refererOrigin = parseHttpOrigin(requestHeaders.get('referer'), { allowPath: true });
   if (refererOrigin && normalizedAllowlist.has(refererOrigin)) {
     return refererOrigin;
   }

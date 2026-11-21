@@ -1,9 +1,12 @@
 'use server';
 
+import { headers } from 'next/headers';
 import { AppDomainError } from '@shark/utils';
 import { loginSchema } from '@shark/validation';
+import { recordVerifiedAdminAuthAudit } from '@/lib/auth/audit';
 import { assertValidAdminOrigin, verifyAdminActorFromClients } from '@/lib/auth/guards';
 import { sanitizeAdminRedirectPath } from '@/lib/auth/origin-and-middleware';
+import { getValidatedAdminPublicEnv } from '@/lib/env';
 import { createAdminServiceClient } from '@/lib/supabase/admin';
 import { createAdminServerClient } from '@/lib/supabase/server';
 
@@ -21,11 +24,13 @@ export interface AdminAuthActionResult {
 
 /**
  * Authenticates an Admin portal caller through Origin/CSRF checks, password verification,
- * Triple-Gate live role verification, and immutable `activity_logs` recording.
+ * Triple-Gate live role verification, MFA policy enforcement, and immutable `activity_logs` recording.
  */
 export async function adminLoginAction(input: AdminLoginInput): Promise<AdminAuthActionResult> {
+  const requestHeaders = await headers();
+
   try {
-    await assertValidAdminOrigin();
+    await assertValidAdminOrigin(requestHeaders);
   } catch (err) {
     if (err instanceof AppDomainError) {
       return { ok: false, messageKey: err.messageKey };
@@ -44,12 +49,12 @@ export async function adminLoginAction(input: AdminLoginInput): Promise<AdminAut
     };
   }
 
+  let publicEnv: ReturnType<typeof getValidatedAdminPublicEnv>;
   let authClient: Awaited<ReturnType<typeof createAdminServerClient>>;
-  let serviceClient: ReturnType<typeof createAdminServiceClient>;
 
   try {
+    publicEnv = getValidatedAdminPublicEnv();
     authClient = await createAdminServerClient();
-    serviceClient = createAdminServiceClient();
   } catch (err) {
     if (err instanceof AppDomainError) {
       return { ok: false, messageKey: err.messageKey };
@@ -66,26 +71,31 @@ export async function adminLoginAction(input: AdminLoginInput): Promise<AdminAut
     return { ok: false, messageKey: 'errors.invalidCredentials' };
   }
 
+  // Instantiate service-role client strictly AFTER password authentication succeeds.
+  let serviceClient: ReturnType<typeof createAdminServiceClient>;
+  try {
+    serviceClient = createAdminServiceClient();
+  } catch (err) {
+    await authClient.auth.signOut({ scope: 'local' }).catch(() => undefined);
+    if (err instanceof AppDomainError) {
+      return { ok: false, messageKey: err.messageKey };
+    }
+    return { ok: false, messageKey: 'errors.envMisconfigured' };
+  }
+
   try {
     const actor = await verifyAdminActorFromClients({
       authClient,
       serviceClient,
+      requireMfaAal2: publicEnv.NEXT_PUBLIC_APP_ENV === 'production',
     });
 
-    const { error: auditError } = await serviceClient.from('activity_logs').insert({
-      actor_id: actor.userId,
-      actor_role: 'admin',
-      actor_admin_role: actor.roleName,
+    await recordVerifiedAdminAuthAudit(serviceClient, {
+      actor,
       action: 'admin.login',
-      entity_type: 'auth_session',
-      entity_id: actor.userId,
-      metadata: { portal: 'admin' },
+      metadata: { portal: 'admin', aal: actor.aal },
+      requestHeaders,
     });
-
-    if (auditError) {
-      await authClient.auth.signOut({ scope: 'local' }).catch(() => undefined);
-      return { ok: false, messageKey: 'errors.auditWriteFailed' };
-    }
 
     return {
       ok: true,
@@ -93,6 +103,19 @@ export async function adminLoginAction(input: AdminLoginInput): Promise<AdminAut
     };
   } catch (err) {
     await authClient.auth.signOut({ scope: 'local' }).catch(() => undefined);
+
+    if (err instanceof AppDomainError && err.code === 'AUDIT_PERSISTENCE_FAILED') {
+      return { ok: false, messageKey: err.messageKey };
+    }
+
+    const deniedReasonCode = err instanceof AppDomainError ? err.code : 'ADMIN_REQUIRED';
+    await recordVerifiedAdminAuthAudit(serviceClient, {
+      actor: null,
+      fallbackActorId: signInData.user.id,
+      action: 'admin.login_denied',
+      metadata: { portal: 'admin', reason_code: deniedReasonCode },
+      requestHeaders,
+    }).catch(() => undefined);
 
     if (err instanceof AppDomainError) {
       return {
@@ -107,11 +130,13 @@ export async function adminLoginAction(input: AdminLoginInput): Promise<AdminAut
 }
 
 /**
- * Signs out the active Admin session with CSRF Origin verification.
+ * Signs out the active session with CSRF Origin verification and audited logout for active admins.
  */
 export async function adminLogoutAction(): Promise<AdminAuthActionResult> {
+  const requestHeaders = await headers();
+
   try {
-    await assertValidAdminOrigin();
+    await assertValidAdminOrigin(requestHeaders);
   } catch (err) {
     if (err instanceof AppDomainError) {
       return { ok: false, messageKey: err.messageKey };
@@ -120,10 +145,32 @@ export async function adminLogoutAction(): Promise<AdminAuthActionResult> {
   }
 
   try {
+    const publicEnv = getValidatedAdminPublicEnv();
     const authClient = await createAdminServerClient();
+    const serviceClient = createAdminServiceClient();
+
+    try {
+      const actor = await verifyAdminActorFromClients({
+        authClient,
+        serviceClient,
+        requireMfaAal2: publicEnv.NEXT_PUBLIC_APP_ENV === 'production',
+      });
+      await recordVerifiedAdminAuthAudit(serviceClient, {
+        actor,
+        action: 'admin.logout',
+        metadata: { portal: 'admin' },
+        requestHeaders,
+      });
+    } catch (err) {
+      if (err instanceof AppDomainError && err.code === 'AUDIT_PERSISTENCE_FAILED') {
+        return { ok: false, messageKey: err.messageKey };
+      }
+      // Non-admin or unverified users clicking sign-out from /unauthorized still clear cookies cleanly
+    }
+
     await authClient.auth.signOut({ scope: 'local' });
   } catch {
-    // Best-effort local signOut returns cleanly to login
+    // Fallback ensures stale auth cookies are not left active if logout fails unexpectedly
   }
 
   return { ok: true, redirectTo: '/login' };

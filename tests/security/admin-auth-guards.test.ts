@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AppDomainError } from '@shark/utils';
+import { recordVerifiedAdminAuthAudit } from '../../apps/admin/src/lib/auth/audit';
 import {
   isPublicAdminPath,
   resolveAdminMiddlewareDecision,
@@ -254,6 +255,9 @@ describe('Admin Triple-Gate, CSRF/Origin validation & client/server isolation (T
       new Headers({ origin: 'null' }),
       new Headers({ origin: 'https://evil.example' }),
       new Headers({ origin: 'http://localhost:3000.evil.com' }),
+      new Headers({ origin: 'http://localhost:3000/with-path' }),
+      new Headers({ origin: 'http://attacker@localhost:3000' }),
+      new Headers({ origin: 'http://localhost:3000', 'sec-fetch-site': 'cross-site' }),
       new Headers({ referer: 'https://attacker.test/csrf.html' }),
     ];
 
@@ -262,7 +266,119 @@ describe('Admin Triple-Gate, CSRF/Origin validation & client/server isolation (T
     }
   });
 
-  it('enforces Admin middleware protection and blocks open-redirect next parameters', () => {
+  it('enforces explicit MFA AAL2 policy, lazy service client isolation, and valid scopes for super_admin', async () => {
+    const lazyServiceFactory = vi.fn();
+    const unauth = createMockAdminClients({ userId: null, authError: true });
+    await expect(
+      verifyAdminActorFromClients({
+        authClient: unauth.authClient,
+        serviceClient: lazyServiceFactory,
+      }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED', statusCode: 401 });
+    expect(lazyServiceFactory).not.toHaveBeenCalled();
+
+    const aal1ProdAdmin = createMockAdminClients({
+      userId: ACTOR_ID,
+      aal: { currentLevel: 'aal1', nextLevel: 'aal1' },
+      profile: {
+        id: ACTOR_ID,
+        email: 'prod-super@shark.test',
+        role: 'admin',
+        account_status: 'approved',
+        deleted_at: null,
+      },
+      adminRole: { role_name: 'super_admin', permissions: [], is_active: true, deleted_at: null },
+    });
+    await expect(
+      verifyAdminActorFromClients({ ...aal1ProdAdmin, requireMfaAal2: true }),
+    ).rejects.toMatchObject({ code: 'MFA_REQUIRED', statusCode: 403 });
+
+    const aal2ProdAdmin = createMockAdminClients({
+      userId: ACTOR_ID,
+      aal: { currentLevel: 'aal2', nextLevel: 'aal2' },
+      profile: {
+        id: ACTOR_ID,
+        email: 'prod-super@shark.test',
+        role: 'admin',
+        account_status: 'approved',
+        deleted_at: null,
+      },
+      adminRole: { role_name: 'super_admin', permissions: [], is_active: true, deleted_at: null },
+    });
+    const verifiedProd = await verifyAdminActorFromClients({
+      ...aal2ProdAdmin,
+      requireMfaAal2: true,
+    });
+    expect(verifiedProd.aal).toBe('aal2');
+
+    await expect(
+      verifyAdminActorFromClients({
+        ...aal2ProdAdmin,
+        requiredScope: 'unknown:invalid_scope' as unknown as 'audit:read',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', messageKey: 'errors.insufficientAdminScope' });
+  });
+
+  it('enforces fail-closed Admin audit logging under verified actor identity only', async () => {
+    const insertedRows: Array<Record<string, unknown>> = [];
+    const okServiceClient = {
+      from: () => ({
+        insert: async (row: Record<string, unknown>) => {
+          insertedRows.push(row);
+          return { error: null };
+        },
+      }),
+    } as unknown as AdminSupabaseClient;
+
+    await recordVerifiedAdminAuthAudit(okServiceClient, {
+      actor: {
+        userId: ACTOR_ID,
+        email: 'super@shark.test',
+        fullName: 'Super Admin',
+        preferredLanguage: 'ar',
+        roleName: 'super_admin',
+        permissions: [],
+        aal: 'aal2',
+      },
+      action: 'admin.login',
+      metadata: { portal: 'admin' },
+      requestHeaders: new Headers({ 'x-forwarded-for': '203.0.113.10, 10.0.0.1' }),
+    });
+
+    expect(insertedRows).toHaveLength(1);
+    expect(insertedRows[0]?.actor_id).toBe(ACTOR_ID);
+    expect(insertedRows[0]?.actor_admin_role).toBe('super_admin');
+    expect(String(insertedRows[0]?.ip_hash)).toMatch(/^[a-f0-9]{64}$/);
+    expect(String(insertedRows[0]?.ip_hash)).not.toContain('203.0.113.10');
+
+    const failingServiceClient = {
+      from: () => ({
+        insert: async () => ({ error: { code: '42501', message: 'audit table error' } }),
+      }),
+    } as unknown as AdminSupabaseClient;
+
+    await expect(
+      recordVerifiedAdminAuthAudit(failingServiceClient, {
+        actor: {
+          userId: ACTOR_ID,
+          email: 'super@shark.test',
+          fullName: 'Super Admin',
+          preferredLanguage: 'ar',
+          roleName: 'super_admin',
+          permissions: [],
+          aal: 'aal2',
+        },
+        action: 'admin.login',
+        requestHeaders: new Headers(),
+      }),
+    ).rejects.toMatchObject({
+      code: 'AUDIT_PERSISTENCE_FAILED',
+      messageKey: 'errors.auditWriteFailed',
+      statusCode: 500,
+    });
+  });
+
+  it('enforces Admin middleware protection and blocks open-redirect bypasses', () => {
     expect(isPublicAdminPath('/login', 'production')).toBe(true);
     expect(isPublicAdminPath('/unauthorized', 'production')).toBe(true);
     expect(isPublicAdminPath('/design-system', 'development')).toBe(true);
@@ -283,15 +399,20 @@ describe('Admin Triple-Gate, CSRF/Origin validation & client/server isolation (T
     expect(sanitizeAdminRedirectPath('https://evil.example')).toBe('/');
     expect(sanitizeAdminRedirectPath('//evil.example/admin')).toBe('/');
     expect(sanitizeAdminRedirectPath('/login?next=/users')).toBe('/');
+    expect(sanitizeAdminRedirectPath('/login/')).toBe('/');
+    expect(sanitizeAdminRedirectPath('/unauthorized?reason=1')).toBe('/');
+    expect(sanitizeAdminRedirectPath('/%252f/evil.example')).toBe('/');
+    expect(sanitizeAdminRedirectPath('/users@evil.example')).toBe('/');
     expect(sanitizeAdminRedirectPath('/users?page=2')).toBe('/users?page=2');
   });
 
-  it('maintains server-only boundaries, bans getSession(), and isolates service-role keys from client code', () => {
+  it('maintains server-only boundaries, bans getSession(), avoids GET mutations, and isolates service-role keys', () => {
     for (const serverFile of [
       'apps/admin/src/lib/env.server.ts',
       'apps/admin/src/lib/supabase/server.ts',
       'apps/admin/src/lib/supabase/admin.ts',
       'apps/admin/src/lib/auth/guards.ts',
+      'apps/admin/src/lib/auth/audit.ts',
     ]) {
       const content = readFileSync(resolve(REPO_ROOT, serverFile), 'utf8');
       expect(content, `${serverFile} must enforce import 'server-only'`).toMatch(
@@ -299,13 +420,20 @@ describe('Admin Triple-Gate, CSRF/Origin validation & client/server isolation (T
       );
     }
 
+    const designSystemPage = readFileSync(
+      resolve(REPO_ROOT, 'apps/admin/src/app/design-system/page.tsx'),
+      'utf8',
+    );
+    expect(designSystemPage).toContain('requireAdminSessionOrRedirect');
+
     const adminFiles = walkAdminTsFiles(resolve(REPO_ROOT, 'apps/admin'));
     for (const file of adminFiles) {
       const content = readFileSync(file, 'utf8');
       expect(content, `Prohibited getSession() call in ${file}`).not.toMatch(/\bgetSession\s*\(/);
+      expect(file, `Unexpected route handler ${file}`).not.toMatch(/route\.(ts|tsx)$/);
       if (content.startsWith("'use client'") || content.startsWith('"use client"')) {
         expect(content, `Server secret import inside client component ${file}`).not.toMatch(
-          /from\s+['"][^'"]*(?:env\.server|supabase\/admin|supabase\/server|auth\/guards)['"]/,
+          /from\s+['"][^'"]*(?:env\.server|supabase\/admin|supabase\/server|auth\/guards|auth\/audit)['"]/,
         );
         expect(content, `Service key leak inside client component ${file}`).not.toContain(
           'SUPABASE_SERVICE_ROLE_KEY',

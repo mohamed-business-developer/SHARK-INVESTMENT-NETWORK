@@ -42,7 +42,12 @@ function mapCodeToDomainError(
 ): AppDomainError | null {
   const normalizedCode = code?.toUpperCase();
 
-  if (normalizedCode === 'ACCOUNT_SUSPENDED' || messageKey === 'errors.accountSuspended') {
+  if (
+    normalizedCode === 'ACCOUNT_SUSPENDED' ||
+    normalizedCode === 'USER_BANNED' ||
+    code === 'user_banned' ||
+    messageKey === 'errors.accountSuspended'
+  ) {
     return new AppDomainError({
       code: 'ACCOUNT_SUSPENDED',
       messageKey: 'errors.accountSuspended',
@@ -68,7 +73,9 @@ function mapCodeToDomainError(
     normalizedCode === 'UNAUTHORIZED' ||
     statusCode === 401 ||
     code === 'refresh_token_not_found' ||
-    code === 'session_not_found'
+    code === 'session_not_found' ||
+    code === 'user_not_found' ||
+    code === 'bad_jwt'
   ) {
     return new AppDomainError({
       code: 'UNAUTHORIZED',

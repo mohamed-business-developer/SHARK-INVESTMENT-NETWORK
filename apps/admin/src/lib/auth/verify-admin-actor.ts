@@ -1,5 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { AdminPermissionScope, AdminRoleName, AppLocale } from '@shark/shared-types';
+import {
+  ADMIN_PERMISSION_SCOPES,
+  type AdminPermissionScope,
+  type AdminRoleName,
+  type AppLocale,
+} from '@shark/shared-types';
 import { AppDomainError } from '@shark/utils';
 
 export interface AdminActorContext {
@@ -9,18 +14,21 @@ export interface AdminActorContext {
   readonly preferredLanguage: AppLocale;
   readonly roleName: AdminRoleName;
   readonly permissions: readonly AdminPermissionScope[];
+  readonly aal: 'aal1' | 'aal2';
 }
 
 export interface VerifyAdminClientsOptions {
   readonly authClient: SupabaseClient;
-  readonly serviceClient: SupabaseClient;
+  readonly serviceClient: SupabaseClient | (() => SupabaseClient);
   readonly requiredScope?: AdminPermissionScope;
+  readonly requireMfaAal2?: boolean;
 }
 
 const ADMIN_PROFILE_SELECT_COLUMNS =
   'id, email, full_name, full_name_ar, full_name_en, preferred_language, role, account_status, deleted_at';
 
 const ADMIN_ROLE_SELECT_COLUMNS = 'role_name, permissions, is_active, deleted_at';
+const KNOWN_ADMIN_SCOPES = new Set<string>(ADMIN_PERMISSION_SCOPES);
 
 /**
  * Blocks administrators from moderating, suspending, or altering their own account.
@@ -37,14 +45,22 @@ export function assertNotActingOnSelf(actorUserId: string, targetUserId: string)
 
 /**
  * Pure server-side Triple-Gate verification core:
- * 1) Verified JWT exclusively via `authClient.auth.getUser()` + MFA `aal2` if enrolled.
+ * 1) Verified JWT exclusively via `authClient.auth.getUser()` + explicit MFA AAL2 policy.
  * 2) Live PostgreSQL `profiles` (`role === 'admin'`, `account_status === 'approved'`, `deleted_at IS NULL`).
- * 3) Live active `admin_roles` row (`is_active === true`, `deleted_at IS NULL`) + scope match.
+ * 3) Live active `admin_roles` row (`is_active === true`, `deleted_at IS NULL`) + validated scope check.
  */
 export async function verifyAdminActorFromClients(
   options: VerifyAdminClientsOptions,
 ): Promise<AdminActorContext> {
-  const { authClient, serviceClient, requiredScope } = options;
+  const { authClient, serviceClient, requiredScope, requireMfaAal2 = false } = options;
+
+  if (requiredScope !== undefined && !KNOWN_ADMIN_SCOPES.has(requiredScope)) {
+    throw new AppDomainError({
+      code: 'FORBIDDEN',
+      messageKey: 'errors.insufficientAdminScope',
+      statusCode: 403,
+    });
+  }
 
   const {
     data: { user },
@@ -59,26 +75,38 @@ export async function verifyAdminActorFromClients(
     });
   }
 
-  if (typeof authClient.auth.mfa?.getAuthenticatorAssuranceLevel === 'function') {
-    const { data: aalData, error: aalError } =
-      await authClient.auth.mfa.getAuthenticatorAssuranceLevel();
-    if (aalError) {
-      throw new AppDomainError({
-        code: 'FORBIDDEN',
-        messageKey: 'errors.adminRequired',
-        statusCode: 403,
-      });
-    }
-    if (aalData?.nextLevel === 'aal2' && aalData.currentLevel !== 'aal2') {
+  let verifiedAal: 'aal1' | 'aal2' = 'aal1';
+  const mfaApi = authClient.auth.mfa;
+  if (typeof mfaApi?.getAuthenticatorAssuranceLevel === 'function') {
+    const { data: aalData, error: aalError } = await mfaApi.getAuthenticatorAssuranceLevel();
+    if (aalError || !aalData?.currentLevel) {
       throw new AppDomainError({
         code: 'MFA_REQUIRED',
         messageKey: 'errors.adminRequired',
         statusCode: 403,
       });
     }
+
+    if ((requireMfaAal2 || aalData.nextLevel === 'aal2') && aalData.currentLevel !== 'aal2') {
+      throw new AppDomainError({
+        code: 'MFA_REQUIRED',
+        messageKey: 'errors.adminRequired',
+        statusCode: 403,
+      });
+    }
+    verifiedAal = aalData.currentLevel === 'aal2' ? 'aal2' : 'aal1';
+  } else if (requireMfaAal2) {
+    throw new AppDomainError({
+      code: 'MFA_REQUIRED',
+      messageKey: 'errors.adminRequired',
+      statusCode: 403,
+    });
   }
 
-  const { data: profile, error: profileError } = await serviceClient
+  const resolvedServiceClient =
+    typeof serviceClient === 'function' ? serviceClient() : serviceClient;
+
+  const { data: profile, error: profileError } = await resolvedServiceClient
     .from('profiles')
     .select(ADMIN_PROFILE_SELECT_COLUMNS)
     .eq('id', user.id)
@@ -108,7 +136,7 @@ export async function verifyAdminActorFromClients(
     });
   }
 
-  const { data: adminRoleRow, error: roleError } = await serviceClient
+  const { data: adminRoleRow, error: roleError } = await resolvedServiceClient
     .from('admin_roles')
     .select(ADMIN_ROLE_SELECT_COLUMNS)
     .eq('user_id', user.id)
@@ -144,5 +172,6 @@ export async function verifyAdminActorFromClients(
     preferredLanguage: profile.preferred_language === 'en' ? 'en' : 'ar',
     roleName,
     permissions: Object.freeze([...permissions]),
+    aal: verifiedAal,
   });
 }

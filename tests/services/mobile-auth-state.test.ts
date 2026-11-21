@@ -201,8 +201,93 @@ describe('Mobile Auth repository & status/stale-session enforcement (T5-05 / T5-
         messageKey: 'errors.accountSuspended',
       });
       expect(revokedHandler).toHaveBeenCalledWith('suspended');
+
+      await expect(
+        assertSupabaseResult({
+          data: null,
+          error: { status: 403, code: 'user_banned', message: 'User is banned' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'ACCOUNT_SUSPENDED',
+        messageKey: 'errors.accountSuspended',
+      });
+      expect(revokedHandler).toHaveBeenCalledWith('suspended');
+
+      await expect(
+        assertSupabaseResult({
+          data: null,
+          error: { status: 403, code: 'user_not_found', message: 'User not found' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'UNAUTHORIZED',
+        messageKey: 'errors.unauthorized',
+      });
+      expect(revokedHandler).toHaveBeenCalledWith('unauthorized');
     } finally {
       unregister();
     }
+  });
+
+  it('ignores tampered JWT user_metadata, clears cold-boot stale sessions, and sequences signOut safely', async () => {
+    const spoofedUser = {
+      id: USER_ID,
+      email: 'attacker@shark.test',
+      user_metadata: { role: 'admin', account_status: 'approved' },
+      app_metadata: { role: 'admin' },
+    } as unknown as AuthUser;
+
+    const spoofedOutcome = deriveMobileAuthTransition({
+      session: FAKE_SESSION,
+      verifiedUser: spoofedUser,
+      profile: buildProfile({
+        role: 'member',
+        account_status: 'pending',
+        onboarding_step: 'account_type',
+      }),
+      priorStatus: 'loading',
+    });
+    expect(spoofedOutcome.nextState.status).toBe('pending');
+    expect(spoofedOutcome.nextState.isApproved).toBe(false);
+    expect(spoofedOutcome.nextState.profile?.role).toBe('member');
+
+    // Cold boot with stale local session where verifiedUser is deleted/revoked (null)
+    const callOrder: string[] = [];
+    const coldRevokedState = await reconcileLiveAuthSession({
+      priorStatus: 'loading',
+      getCurrentSession: async () => FAKE_SESSION,
+      getVerifiedUser: async () => null,
+      fetchOwnProfile: async () => null,
+      clearProtectedCache: () => {
+        callOrder.push('clearCache');
+      },
+      onBeforeRevokedSignOut: (nextState) => {
+        callOrder.push(`preSignOut:${nextState.status}`);
+      },
+      localSignOut: async () => {
+        callOrder.push('signOut');
+      },
+    });
+    expect(coldRevokedState.status).toBe('guest');
+    expect(coldRevokedState.isAuthenticated).toBe(false);
+    expect(callOrder).toEqual(['clearCache', 'preSignOut:guest', 'signOut']);
+
+    // Suspended sequence must update hook status BEFORE firing local signOut
+    const suspendOrder: string[] = [];
+    await reconcileLiveAuthSession({
+      priorStatus: 'approved',
+      getCurrentSession: async () => FAKE_SESSION,
+      getVerifiedUser: async () => FAKE_USER,
+      fetchOwnProfile: async () => buildProfile({ account_status: 'suspended' }),
+      clearProtectedCache: () => {
+        suspendOrder.push('clearCache');
+      },
+      onBeforeRevokedSignOut: (nextState) => {
+        suspendOrder.push(`preSignOut:${nextState.status}`);
+      },
+      localSignOut: async () => {
+        suspendOrder.push('signOut');
+      },
+    });
+    expect(suspendOrder).toEqual(['clearCache', 'preSignOut:suspended', 'signOut']);
   });
 });

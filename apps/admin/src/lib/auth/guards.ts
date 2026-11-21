@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import type { AdminPermissionScope } from '@shark/shared-types';
 import { AppDomainError } from '@shark/utils';
+import { getValidatedAdminPublicEnv } from '../env';
 import { getValidatedAdminServerEnv } from '../env.server';
 import { createAdminServiceClient } from '../supabase/admin';
 import { createAdminServerClient } from '../supabase/server';
@@ -31,26 +32,25 @@ export async function assertValidAdminOrigin(requestHeaders?: Headers): Promise<
 }
 
 /**
- * Verifies live Admin session + active governance role + optional permission scope server-side.
+ * Verifies live Admin session + MFA AAL2 policy + governance role + optional permission scope server-side.
  */
 export async function requireAdminContext(
   requiredScope?: AdminPermissionScope,
 ): Promise<AdminActorContext> {
-  const [authClient, serviceClient] = await Promise.all([
-    createAdminServerClient(),
-    Promise.resolve(createAdminServiceClient()),
-  ]);
+  const publicEnv = getValidatedAdminPublicEnv();
+  const authClient = await createAdminServerClient();
 
   return verifyAdminActorFromClients({
     authClient,
-    serviceClient,
+    serviceClient: () => createAdminServiceClient(),
     requiredScope,
+    requireMfaAal2: publicEnv.NEXT_PUBLIC_APP_ENV === 'production',
   });
 }
 
 /**
  * Server-Component / Layout guard redirecting unauthenticated users to `/login`
- * and unauthorized/suspended/non-admin callers to `/unauthorized`.
+ * and unauthorized/suspended/non-admin/MFA-incomplete callers to `/unauthorized`.
  */
 export async function requireAdminSessionOrRedirect(
   requiredScope?: AdminPermissionScope,

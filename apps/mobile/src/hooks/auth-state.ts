@@ -103,7 +103,8 @@ export function deriveMobileAuthTransition(params: {
 
   if (!verifiedUser || !session) {
     return {
-      shouldClearProtectedCache: priorStatus !== 'guest' && priorStatus !== 'loading',
+      shouldClearProtectedCache:
+        Boolean(session) || (priorStatus !== 'guest' && priorStatus !== 'loading'),
       shouldSignOutLocal: Boolean(session),
       nextState: createInitialGuestAuthState({
         status: priorStatus === 'suspended' ? 'suspended' : 'guest',
@@ -208,6 +209,7 @@ export interface ReconcileAuthDependencies {
   readonly fetchOwnProfile: (userId: string) => Promise<ProfileRow | null>;
   readonly clearProtectedCache: () => void;
   readonly localSignOut: () => Promise<void>;
+  readonly onBeforeRevokedSignOut?: (nextState: MobileAuthState) => void;
   readonly forcedRevocationReason?: RevokedAccessReason;
 }
 
@@ -229,6 +231,7 @@ export async function reconcileLiveAuthSession(
       deps.clearProtectedCache();
     }
     if (forced.shouldSignOutLocal) {
+      deps.onBeforeRevokedSignOut?.(forced.nextState);
       await deps.localSignOut().catch(() => undefined);
     }
     return forced.nextState;
@@ -252,6 +255,7 @@ export async function reconcileLiveAuthSession(
         forcedRevocationReason: 'suspended',
       });
       deps.clearProtectedCache();
+      deps.onBeforeRevokedSignOut?.(revoked.nextState);
       await deps.localSignOut().catch(() => undefined);
       return revoked.nextState;
     }
@@ -268,6 +272,7 @@ export async function reconcileLiveAuthSession(
     deps.clearProtectedCache();
   }
   if (outcome.shouldSignOutLocal) {
+    deps.onBeforeRevokedSignOut?.(outcome.nextState);
     await deps.localSignOut().catch(() => undefined);
   }
 

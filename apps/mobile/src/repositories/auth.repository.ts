@@ -198,6 +198,8 @@ export function createAuthRepository(client: SupabaseClient): MobileAuthReposito
             onboarding_step: 'profile_setup',
           })
           .eq('id', userData.user.id)
+          .eq('account_status', 'pending')
+          .eq('onboarding_completed', false)
           .select(PROFILE_SELF_SELECT_COLUMNS)
           .single<ProfileRow>();
 
