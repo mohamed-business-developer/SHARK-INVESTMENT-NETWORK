@@ -121,6 +121,19 @@ export function applyFeaturedTimestampCursorFilter<TQuery extends KeysetFilterab
 }
 
 /**
+ * Applies deterministic keyset pagination filters matching `(created_at DESC, id DESC)`.
+ */
+export function applyCreatedAtCursorFilter<TQuery extends KeysetFilterableQuery<TQuery>>(
+  query: TQuery,
+  cursor: KeysetCursor | null,
+): TQuery {
+  if (!cursor) {
+    return query;
+  }
+  return query.or(`created_at.lt.${cursor.ts},and(created_at.eq.${cursor.ts},id.lt.${cursor.id})`);
+}
+
+/**
  * Builds a public CDN URL exclusively from the `public-assets` bucket after traversal validation.
  */
 export function resolvePublicAssetUrl(

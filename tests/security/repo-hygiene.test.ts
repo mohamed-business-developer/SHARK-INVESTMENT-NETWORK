@@ -1,6 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS,
+  PITCH_REVIEW_SELECT_COLUMNS,
+} from '../../apps/mobile/src/repositories/pitch.repository';
+import { VERIFICATION_REQUEST_SELECT_COLUMNS } from '../../apps/mobile/src/repositories/verification.repository';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 
@@ -30,12 +35,16 @@ describe('P5-U04 Repository, Service & Hook Security Hygiene', () => {
   const adminActionFiles = collectTsFiles(resolve(REPO_ROOT, 'apps/admin/src/actions'));
 
   it('forbids unbounded .select(*) across all Mobile & Admin repositories', () => {
-    expect(mobileRepoFiles.length).toBeGreaterThanOrEqual(3);
+    expect(mobileRepoFiles.length).toBeGreaterThanOrEqual(7);
 
     for (const file of [...mobileRepoFiles, ...adminRepoFiles]) {
       const content = readFileSync(file, 'utf8');
       expect(content, `Forbidden .select('*') in ${file}`).not.toMatch(/\.select\(\s*['"]\*['"]/);
     }
+
+    expect(VERIFICATION_REQUEST_SELECT_COLUMNS).not.toContain('internal_notes');
+    expect(PITCH_REVIEW_SELECT_COLUMNS).not.toContain('internal_notes');
+    expect(INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS).not.toContain('founder_notes');
   });
 
   it('prevents Mobile from referencing internal_notes, server-only Admin clients, service role keys, or private bucket getPublicUrl()', () => {
@@ -50,8 +59,8 @@ describe('P5-U04 Repository, Service & Hook Security Hygiene', () => {
       expect(content, `Forbidden admin client import in ${file}`).not.toMatch(
         /lib\/supabase\/admin/,
       );
-      expect(content, `Forbidden private bucket getPublicUrl() call in ${file}`).not.toMatch(
-        /from\(\s*['"](?:pitch-documents|verification-documents)['"]\s*\)\.getPublicUrl/,
+      expect(content, `Forbidden private bucket URL or upload call in ${file}`).not.toMatch(
+        /from\(\s*['"](?:pitch-documents|verification-documents)['"]\s*\)\.(?:getPublicUrl|createSignedUrl|upload)/,
       );
     }
   });
