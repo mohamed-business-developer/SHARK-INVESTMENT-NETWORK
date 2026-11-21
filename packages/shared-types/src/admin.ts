@@ -91,3 +91,18 @@ export interface ApiErrorEnvelope {
     readonly requestId: string;
   };
 }
+
+export interface PublicSystemFlagRow {
+  readonly setting_key: string;
+  readonly value: Record<string, unknown> | string | number | boolean | null;
+}
+
+export interface PublicSystemFlags {
+  readonly registrationEnabled: boolean;
+  readonly maintenanceBanner: {
+    readonly enabled: boolean;
+    readonly messageAr: string;
+    readonly messageEn: string;
+  };
+  readonly raw: Readonly<Record<string, unknown>>;
+}

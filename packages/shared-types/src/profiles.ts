@@ -151,6 +151,23 @@ export interface PortfolioCompanyRow {
   readonly deleted_at: string | null;
 }
 
+export interface PublicPortfolioCompanyDirectoryRow {
+  readonly id: string;
+  readonly investor_user_id: string;
+  readonly company_id: string | null;
+  readonly external_name_ar: string | null;
+  readonly external_name_en: string | null;
+  readonly logo_path: string | null;
+  readonly sector_id: string | null;
+  readonly investment_stage: FundingStage | null;
+  readonly investment_year: number | null;
+  readonly website_url: string | null;
+  readonly summary_ar: string | null;
+  readonly summary_en: string | null;
+  readonly is_exited: boolean;
+  readonly sort_order: number;
+}
+
 export interface SavedItemRow {
   readonly id: string;
   readonly user_id: string;

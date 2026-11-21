@@ -7,3 +7,4 @@ export * from './formatters';
 export * from './i18n-helpers';
 export * from './pagination';
 export * from './rtl';
+export * from './search';

@@ -98,3 +98,20 @@ export function resolveI18nMessageKey(
   const resolved = direct ?? lookupNestedString(catalog, fallbackKey) ?? fallbackKey;
   return interpolate(resolved, params);
 }
+
+/**
+ * Selects the locale-appropriate text with bidirectional fallback so Arabic/English UI never renders empty.
+ */
+export function pickLocalizedText(
+  locale: AppLocale,
+  arValue: string | null | undefined,
+  enValue: string | null | undefined,
+  fallback = '',
+): string {
+  const ar = arValue?.trim() ?? '';
+  const en = enValue?.trim() ?? '';
+  if (locale === 'ar') {
+    return ar || en || fallback;
+  }
+  return en || ar || fallback;
+}
