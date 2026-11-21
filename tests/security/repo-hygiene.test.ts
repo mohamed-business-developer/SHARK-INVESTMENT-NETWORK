@@ -1,7 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { COMPANY_SELF_SELECT_COLUMNS } from '../../apps/mobile/src/repositories/company.repository';
+import { PUBLIC_COMPANY_DIRECTORY_SELECT_COLUMNS } from '../../apps/mobile/src/repositories/directory.repository';
 import {
+  INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS,
   INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS,
   PITCH_REVIEW_SELECT_COLUMNS,
 } from '../../apps/mobile/src/repositories/pitch.repository';
@@ -45,6 +48,78 @@ describe('P5-U04 Repository, Service & Hook Security Hygiene', () => {
     expect(VERIFICATION_REQUEST_SELECT_COLUMNS).not.toContain('internal_notes');
     expect(PITCH_REVIEW_SELECT_COLUMNS).not.toContain('internal_notes');
     expect(INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS).not.toContain('founder_notes');
+    expect(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS).toContain('founder_notes');
+
+    for (const privateField of [
+      'registration_number',
+      'admin_feedback',
+      'rejection_reason',
+      'approved_by',
+      'verified_by',
+      'owner_id',
+    ]) {
+      expect(PUBLIC_COMPANY_DIRECTORY_SELECT_COLUMNS).not.toContain(privateField);
+    }
+
+    for (const operatorField of [
+      'registration_number',
+      'admin_feedback',
+      'rejection_reason',
+      'approved_by',
+      'verified_by',
+    ]) {
+      expect(COMPANY_SELF_SELECT_COLUMNS).toContain(operatorField);
+    }
+
+    const directoryRepoFile = mobileRepoFiles.find((file) =>
+      file.replaceAll('\\', '/').endsWith('/directory.repository.ts'),
+    );
+    const companyRepoFile = mobileRepoFiles.find((file) =>
+      file.replaceAll('\\', '/').endsWith('/company.repository.ts'),
+    );
+    const pitchRepoFile = mobileRepoFiles.find((file) =>
+      file.replaceAll('\\', '/').endsWith('/pitch.repository.ts'),
+    );
+
+    expect(directoryRepoFile).toBeDefined();
+    expect(companyRepoFile).toBeDefined();
+    expect(pitchRepoFile).toBeDefined();
+
+    const directoryRepoContent = readFileSync(directoryRepoFile ?? '', 'utf8');
+    const companyRepoContent = readFileSync(companyRepoFile ?? '', 'utf8');
+    const pitchRepoContent = readFileSync(pitchRepoFile ?? '', 'utf8');
+
+    expect(directoryRepoContent).not.toContain('COMPANY_SELF_SELECT_COLUMNS');
+    expect(companyRepoContent).toMatch(
+      /async\s+getOperatedCompanyById\([\s\S]*?verifyCompanyOperator\(/,
+    );
+
+    // Non-owner / investor projections must remain strictly isolated from founder_notes
+    const founderProjectionUsages =
+      pitchRepoContent.match(/INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/g) ?? [];
+    expect(founderProjectionUsages).toHaveLength(3); // 1 declaration + 2 operator-gated usages
+    expect(pitchRepoContent).toMatch(
+      /async\s+listPitchInvestmentInterests\([\s\S]*?verifyCompanyOperator\([\s\S]*?INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/,
+    );
+    expect(pitchRepoContent).toMatch(
+      /async\s+respondToInvestmentInterest\([\s\S]*?verifyCompanyOperator\([\s\S]*?INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/,
+    );
+
+    for (const methodName of [
+      'listOwnInvestmentInterests',
+      'submitInvestmentInterest',
+      'withdrawInvestmentInterest',
+    ]) {
+      const startIndex = pitchRepoContent.indexOf(`async ${methodName}(`);
+      expect(startIndex).toBeGreaterThan(-1);
+      const nextMethodOffset = pitchRepoContent.slice(startIndex + 1).search(/\n\s+async\s+/);
+      const methodBody =
+        nextMethodOffset === -1
+          ? pitchRepoContent.slice(startIndex)
+          : pitchRepoContent.slice(startIndex, startIndex + 1 + nextMethodOffset);
+      expect(methodBody).not.toContain('INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS');
+      expect(methodBody).toContain('INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS');
+    }
   });
 
   it('prevents Mobile from referencing internal_notes, server-only Admin clients, service role keys, or private bucket getPublicUrl()', () => {

@@ -36,6 +36,7 @@ import {
   requireAuthenticatedUser,
   requireEntityRow,
   resolveCursorOrThrow,
+  verifyCompanyOperator,
 } from './helpers';
 
 export const PITCH_SELECT_COLUMNS = [
@@ -827,11 +828,37 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       const limit = clampPageLimit(pageParams.limit, 20);
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        const pitchRefResult = await client
+          .from('pitches')
+          .select('id, company_id')
+          .eq('id', validPitchId)
+          .is('deleted_at', null)
+          .maybeSingle<{ readonly id: string; readonly company_id: string }>();
+
+        const pitchRef = await assertSupabaseResult(pitchRefResult);
+        if (!pitchRef) {
+          throw new AppDomainError({
+            code: 'FORBIDDEN',
+            messageKey: 'errors.forbidden',
+            statusCode: 403,
+          });
+        }
+
+        const operatorAccess = await verifyCompanyOperator(client, user.id, pitchRef.company_id);
+        if (!operatorAccess.isOperator) {
+          throw new AppDomainError({
+            code: 'FORBIDDEN',
+            messageKey: 'errors.forbidden',
+            statusCode: 403,
+          });
+        }
+
         let query = client
           .from('investment_interests')
           .select(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS)
           .eq('pitch_id', validPitchId)
+          .eq('company_id', pitchRef.company_id)
           .is('deleted_at', null);
 
         query = applyCreatedAtCursorFilter(query, decodedCursor);
@@ -907,7 +934,32 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       }
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        const interestRefResult = await client
+          .from('investment_interests')
+          .select('id, company_id')
+          .eq('id', valid.interest_id)
+          .is('deleted_at', null)
+          .maybeSingle<{ readonly id: string; readonly company_id: string }>();
+
+        const interestRef = await assertSupabaseResult(interestRefResult);
+        if (!interestRef) {
+          throw new AppDomainError({
+            code: 'FORBIDDEN',
+            messageKey: 'errors.forbidden',
+            statusCode: 403,
+          });
+        }
+
+        const operatorAccess = await verifyCompanyOperator(client, user.id, interestRef.company_id);
+        if (!operatorAccess.isOperator) {
+          throw new AppDomainError({
+            code: 'FORBIDDEN',
+            messageKey: 'errors.forbidden',
+            statusCode: 403,
+          });
+        }
+
         const result = await client
           .from('investment_interests')
           .update({
@@ -916,6 +968,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
             reviewed_at: new Date().toISOString(),
           })
           .eq('id', valid.interest_id)
+          .eq('company_id', interestRef.company_id)
           .is('deleted_at', null)
           .select(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS)
           .maybeSingle<InvestmentInterestRow>();

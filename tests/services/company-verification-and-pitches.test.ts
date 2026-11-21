@@ -14,6 +14,10 @@ import {
   createCompanyRepository,
 } from '../../apps/mobile/src/repositories/company.repository';
 import {
+  createDirectoryRepository,
+  PUBLIC_COMPANY_DIRECTORY_SELECT_COLUMNS,
+} from '../../apps/mobile/src/repositories/directory.repository';
+import {
   createPitchRepository,
   derivePitchAccessState,
   INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS,
@@ -34,6 +38,7 @@ import {
 } from '../../apps/mobile/src/repositories/verification.repository';
 
 type CompanySupabaseClient = Parameters<typeof createCompanyRepository>[0];
+type DirectorySupabaseClient = Parameters<typeof createDirectoryRepository>[0];
 type VerificationSupabaseClient = Parameters<typeof createVerificationRepository>[0];
 type PitchSupabaseClient = Parameters<typeof createPitchRepository>[0];
 type SavedSupabaseClient = Parameters<typeof createSavedRepository>[0];
@@ -62,14 +67,23 @@ interface RecordedQuery {
   limitValue?: number;
 }
 
+interface RecordedRpcCall {
+  fn: string;
+  args: Record<string, unknown>;
+}
+
 function createRecordingClient(config?: {
   authUserId?: string | null;
   authError?: boolean;
   responseByTable?: Record<string, unknown>;
   sequentialResponses?: Array<{ data: unknown; error?: unknown }>;
+  rpcResponses?: Record<string, { data: unknown; error?: unknown }>;
+  sequentialRpcResponses?: Array<{ data: unknown; error?: unknown }>;
 }) {
   const ops: RecordedQuery[] = [];
+  const rpcOps: RecordedRpcCall[] = [];
   let seqIndex = 0;
+  let rpcSeqIndex = 0;
 
   const from = (table: string) => {
     const op: RecordedQuery = {
@@ -174,11 +188,25 @@ function createRecordingClient(config?: {
           : { data: { user: { id: config.authUserId, email: 'founder@shark.test' } }, error: null },
     },
     from,
+    async rpc(fn: string, args: Record<string, unknown> = {}) {
+      rpcOps.push({ fn, args });
+      if (config?.sequentialRpcResponses && rpcSeqIndex < config.sequentialRpcResponses.length) {
+        const entry = config.sequentialRpcResponses[rpcSeqIndex++]!;
+        return { data: entry.data, error: entry.error ?? null };
+      }
+      if (config?.rpcResponses && fn in config.rpcResponses) {
+        const entry = config.rpcResponses[fn]!;
+        return { data: entry.data, error: entry.error ?? null };
+      }
+      return { data: false, error: null };
+    },
   };
 
   return {
     ops,
+    rpcOps,
     companyClient: client as unknown as CompanySupabaseClient,
+    directoryClient: client as unknown as DirectorySupabaseClient,
     verificationClient: client as unknown as VerificationSupabaseClient,
     pitchClient: client as unknown as PitchSupabaseClient,
     savedClient: client as unknown as SavedSupabaseClient,
@@ -695,9 +723,7 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
         {
           data: {
             id: INTEREST_ID,
-            pitch_id: PITCH_ID,
-            status: 'shortlisted',
-            founder_notes: 'Strong fit',
+            company_id: COMPANY_ID,
           },
         },
       ],
@@ -740,12 +766,43 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
       }),
     ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', statusCode: 400 });
 
-    await repo.respondToInvestmentInterest({
+    // Non-operator investor cannot invoke operator interest response or select founder_notes
+    await expect(
+      repo.respondToInvestmentInterest({
+        interest_id: INTEREST_ID,
+        status: 'shortlisted',
+        founder_notes: 'Strong fit',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+    expect(mock.ops[3]?.selectColumns).toBe('id, company_id');
+    expect(
+      mock.ops.some((op) => op.selectColumns === INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS),
+    ).toBe(false);
+
+    // Verified company operator succeeds using founder-only projection
+    const founderMock = createRecordingClient({
+      authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        { data: { id: INTEREST_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        {
+          data: {
+            id: INTEREST_ID,
+            pitch_id: PITCH_ID,
+            status: 'shortlisted',
+            founder_notes: 'Strong fit',
+          },
+        },
+      ],
+    });
+    const founderRepo = createPitchRepository(founderMock.pitchClient);
+    await founderRepo.respondToInvestmentInterest({
       interest_id: INTEREST_ID,
       status: 'shortlisted',
       founder_notes: 'Strong fit',
     });
-    expect(mock.ops[3]?.selectColumns).toBe(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS);
+    expect(founderMock.ops[2]?.selectColumns).toBe(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS);
   });
 
   it('toggles saved_items via delete/insert without update and applies/rolls back optimistic cache pages', async () => {
@@ -871,5 +928,339 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
     );
     expect(useSavedSource.match(/enabled:\s*Boolean\(userId\)\s*&&\s*isApproved/g)?.length).toBe(2);
     expect(useSavedSource).toContain('errors.accountApprovalRequired');
+  });
+});
+
+describe('M5.3 Security Remediation — Operator Projections & Founder Notes Isolation', () => {
+  const OTHER_COMPANY_ID = '22222222-2222-4222-8222-222222222202';
+  const OTHER_PITCH_ID = '33333333-3333-4333-8333-333333333302';
+
+  it('Finding 1 Negative: blocks approved non-owner from getOperatedCompanyById & private fields (including stale RPC)', async () => {
+    // 1a. RPC returns false -> returns null with zero table queries
+    const nonOwnerMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: false } },
+    });
+    const nonOwnerRepo = createCompanyRepository(nonOwnerMock.companyClient);
+    const deniedCompany = await nonOwnerRepo.getOperatedCompanyById(COMPANY_ID);
+
+    expect(deniedCompany).toBeNull();
+    expect(nonOwnerMock.rpcOps).toEqual([
+      { fn: 'is_company_operator', args: { target_company_id: COMPANY_ID } },
+    ]);
+    expect(nonOwnerMock.ops).toHaveLength(0);
+
+    // 1b. Defense-in-depth: even if RPC transiently returns true, non-owner & non-member is blocked
+    // before COMPANY_SELF_SELECT_COLUMNS is ever requested
+    const staleRpcMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } }, // companies ownership check
+        { data: null }, // active company_members check
+      ],
+    });
+    const staleRpcRepo = createCompanyRepository(staleRpcMock.companyClient);
+    const blockedByOwnership = await staleRpcRepo.getOperatedCompanyById(COMPANY_ID);
+
+    expect(blockedByOwnership).toBeNull();
+    expect(staleRpcMock.ops.some((op) => op.selectColumns === COMPANY_SELF_SELECT_COLUMNS)).toBe(
+      false,
+    );
+    expect(staleRpcMock.ops.some((op) => op.selectColumns?.includes('registration_number'))).toBe(
+      false,
+    );
+    expect(staleRpcMock.ops.some((op) => op.selectColumns?.includes('admin_feedback'))).toBe(false);
+    expect(staleRpcMock.ops.some((op) => op.selectColumns?.includes('rejection_reason'))).toBe(
+      false,
+    );
+  });
+
+  it('Finding 1 Public Isolation: directory queries public_companies_directory without operator-only fields', async () => {
+    const publicRow = {
+      id: COMPANY_ID,
+      slug: 'madar-fintech',
+      name_ar: 'منظومة مدار',
+      name_en: 'Madar FinTech',
+      verification_status: 'verified',
+    };
+    const mock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      responseByTable: { public_companies_directory: publicRow },
+    });
+    const directoryRepo = createDirectoryRepository(mock.directoryClient);
+    const detail = await directoryRepo.getPublicCompanyById(COMPANY_ID);
+
+    expect(detail).toEqual(publicRow);
+    expect(mock.ops[0]?.table).toBe('public_companies_directory');
+    expect(mock.ops[0]?.selectColumns).toBe(PUBLIC_COMPANY_DIRECTORY_SELECT_COLUMNS);
+    for (const privateField of [
+      'registration_number',
+      'admin_feedback',
+      'rejection_reason',
+      'approved_by',
+      'verified_by',
+      'owner_id',
+    ]) {
+      expect(PUBLIC_COMPANY_DIRECTORY_SELECT_COLUMNS).not.toContain(privateField);
+      expect(mock.ops[0]?.selectColumns).not.toContain(privateField);
+    }
+  });
+
+  it('Finding 2 Negative: isolates investor self-queries from founder_notes and forbids operator interest endpoints', async () => {
+    const ownInterestRow = {
+      id: INTEREST_ID,
+      pitch_id: PITCH_ID,
+      company_id: COMPANY_ID,
+      investor_id: OTHER_USER_ID,
+      status: 'submitted',
+    };
+    const investorMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: false } },
+      sequentialResponses: [
+        { data: [ownInterestRow] }, // listOwnInvestmentInterests
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } }, // listPitchInvestmentInterests lookup
+        { data: { id: INTEREST_ID, company_id: COMPANY_ID } }, // respondToInvestmentInterest lookup
+      ],
+    });
+    const investorRepo = createPitchRepository(investorMock.pitchClient);
+
+    const ownPage = await investorRepo.listOwnInvestmentInterests({ limit: 10 });
+    expect(ownPage.items).toHaveLength(1);
+    expect(investorMock.ops[0]?.selectColumns).toBe(INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS);
+    expect(investorMock.ops[0]?.selectColumns).not.toContain('founder_notes');
+
+    await expect(investorRepo.listPitchInvestmentInterests(PITCH_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+    await expect(
+      investorRepo.respondToInvestmentInterest({
+        interest_id: INTEREST_ID,
+        status: 'shortlisted',
+        founder_notes: 'Attempted unauthorized note write',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+
+    expect(
+      investorMock.ops.some(
+        (op) => op.selectColumns === INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS,
+      ),
+    ).toBe(false);
+
+    // Defense-in-depth: even if RPC returned true, non-operator investor is blocked with 403
+    const spoofRpcMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: null }, // active company_members null
+      ],
+    });
+    const spoofRpcRepo = createPitchRepository(spoofRpcMock.pitchClient);
+    await expect(spoofRpcRepo.listPitchInvestmentInterests(PITCH_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+    expect(
+      spoofRpcMock.ops.some(
+        (op) => op.selectColumns === INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS,
+      ),
+    ).toBe(false);
+  });
+
+  it('Finding 1 & 2 Positive (Owner): company owner accesses operated projection and founder_notes', async () => {
+    const ownerCompany = {
+      id: COMPANY_ID,
+      owner_id: USER_ID,
+      status: 'approved',
+      registration_number: 'CR-778899',
+      admin_feedback: 'Docs verified',
+      rejection_reason: null,
+      approved_by: OTHER_USER_ID,
+      verified_by: OTHER_USER_ID,
+    };
+    const founderInterest = {
+      id: INTEREST_ID,
+      pitch_id: PITCH_ID,
+      company_id: COMPANY_ID,
+      investor_id: OTHER_USER_ID,
+      status: 'reviewing',
+      founder_notes: 'Top tier fintech angel — schedule partner call',
+    };
+
+    const ownerMock = createRecordingClient({
+      authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        // getOperatedCompanyById
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: ownerCompany },
+        // listPitchInvestmentInterests
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: [founderInterest] },
+        // respondToInvestmentInterest
+        { data: { id: INTEREST_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        {
+          data: {
+            ...founderInterest,
+            status: 'shortlisted',
+            founder_notes: 'Proceed to diligence',
+          },
+        },
+      ],
+    });
+
+    const companyRepo = createCompanyRepository(ownerMock.companyClient);
+    const pitchRepo = createPitchRepository(ownerMock.pitchClient);
+
+    const company = await companyRepo.getOperatedCompanyById(COMPANY_ID);
+    expect(company?.registration_number).toBe('CR-778899');
+    expect(ownerMock.ops[1]?.selectColumns).toBe(COMPANY_SELF_SELECT_COLUMNS);
+
+    const interests = await pitchRepo.listPitchInvestmentInterests(PITCH_ID);
+    expect(interests.items[0]?.founder_notes).toBe(
+      'Top tier fintech angel — schedule partner call',
+    );
+    expect(ownerMock.ops[4]?.selectColumns).toBe(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS);
+
+    const updated = await pitchRepo.respondToInvestmentInterest({
+      interest_id: INTEREST_ID,
+      status: 'shortlisted',
+      founder_notes: 'Proceed to diligence',
+    });
+    expect(updated.founder_notes).toBe('Proceed to diligence');
+    expect(ownerMock.ops[7]?.selectColumns).toBe(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS);
+  });
+
+  it('Finding 1 & 2 Positive (Active Member): active company_members operator accesses operated data & founder_notes', async () => {
+    const operatedCompany = {
+      id: COMPANY_ID,
+      owner_id: USER_ID, // owned by USER_ID, caller is OTHER_USER_ID (active team member)
+      status: 'approved',
+      registration_number: 'CR-TEAM-01',
+      admin_feedback: null,
+      rejection_reason: null,
+      approved_by: null,
+      verified_by: null,
+    };
+    const interestRow = {
+      id: INTEREST_ID,
+      pitch_id: PITCH_ID,
+      company_id: COMPANY_ID,
+      investor_id: '11111111-1111-4111-8111-111111111199',
+      status: 'submitted',
+      founder_notes: 'Team partner review pending',
+    };
+
+    const memberMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        // getOperatedCompanyById
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } }, // not owner
+        { data: { id: MEMBER_ID } }, // active company member
+        { data: operatedCompany },
+        // listPitchInvestmentInterests
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: { id: MEMBER_ID } },
+        { data: [interestRow] },
+      ],
+    });
+
+    const companyRepo = createCompanyRepository(memberMock.companyClient);
+    const pitchRepo = createPitchRepository(memberMock.pitchClient);
+
+    const company = await companyRepo.getOperatedCompanyById(COMPANY_ID);
+    expect(company?.id).toBe(COMPANY_ID);
+    expect(memberMock.ops[2]?.selectColumns).toBe(COMPANY_SELF_SELECT_COLUMNS);
+    // Active member query must NOT enforce owner_id = caller
+    expect(
+      memberMock.ops[2]?.filters.some(
+        (f) => f.op === 'eq' && f.args[0] === 'owner_id' && f.args[1] === OTHER_USER_ID,
+      ),
+    ).toBe(false);
+
+    const interests = await pitchRepo.listPitchInvestmentInterests(PITCH_ID);
+    expect(interests.items[0]?.founder_notes).toBe('Team partner review pending');
+    expect(memberMock.ops[6]?.selectColumns).toBe(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS);
+  });
+
+  it('enforces cross-company, suspended company, and unauthenticated isolation boundaries', async () => {
+    // 6a. listMyOperatedCompanies filters out non-operated/suspended rows defensively
+    const operatedListMock = createRecordingClient({
+      authUserId: USER_ID,
+      sequentialResponses: [
+        { data: [{ company_id: COMPANY_ID }] }, // active company_members
+        {
+          data: [
+            {
+              id: COMPANY_ID,
+              owner_id: USER_ID,
+              status: 'approved',
+              registration_number: 'CR-OWN',
+            },
+            {
+              id: OTHER_COMPANY_ID,
+              owner_id: OTHER_USER_ID,
+              status: 'approved',
+              registration_number: 'CR-LEAK',
+            },
+            {
+              id: '22222222-2222-4222-8222-222222222209',
+              owner_id: USER_ID,
+              status: 'suspended',
+              registration_number: 'CR-SUSPENDED',
+            },
+          ],
+        },
+      ],
+    });
+    const listRepo = createCompanyRepository(operatedListMock.companyClient);
+    const listResult = await listRepo.listMyOperatedCompanies();
+    expect(listResult.map((c) => c.id)).toEqual([COMPANY_ID]);
+    expect(operatedListMock.ops[1]?.filters).toContainEqual({
+      op: 'neq',
+      args: ['status', 'suspended'],
+    });
+
+    // 6b. Suspended company returns null on getOperatedCompanyById even if RPC returns true
+    const suspendedMock = createRecordingClient({
+      authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [{ data: { id: COMPANY_ID, owner_id: USER_ID, status: 'suspended' } }],
+    });
+    const suspendedRepo = createCompanyRepository(suspendedMock.companyClient);
+    expect(await suspendedRepo.getOperatedCompanyById(COMPANY_ID)).toBeNull();
+    expect(suspendedMock.ops.some((op) => op.selectColumns === COMPANY_SELF_SELECT_COLUMNS)).toBe(
+      false,
+    );
+
+    // 6c. Cross-company pitch interest access is rejected with 403
+    const crossCompanyMock = createRecordingClient({
+      authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: false } },
+      sequentialResponses: [{ data: { id: OTHER_PITCH_ID, company_id: OTHER_COMPANY_ID } }],
+    });
+    const crossPitchRepo = createPitchRepository(crossCompanyMock.pitchClient);
+    await expect(crossPitchRepo.listPitchInvestmentInterests(OTHER_PITCH_ID)).rejects.toMatchObject(
+      { code: 'FORBIDDEN', statusCode: 403 },
+    );
+
+    // 7. Unauthenticated caller receives 401 with zero RPC/DB queries
+    const unauthMock = createRecordingClient({ authUserId: null, authError: true });
+    await expect(
+      createCompanyRepository(unauthMock.companyClient).getOperatedCompanyById(COMPANY_ID),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED', statusCode: 401 });
+    await expect(
+      createPitchRepository(unauthMock.pitchClient).listPitchInvestmentInterests(PITCH_ID),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED', statusCode: 401 });
+    expect(unauthMock.ops).toHaveLength(0);
+    expect(unauthMock.rpcOps).toHaveLength(0);
   });
 });

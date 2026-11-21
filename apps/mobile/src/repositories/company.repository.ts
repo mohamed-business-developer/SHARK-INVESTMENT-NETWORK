@@ -19,6 +19,7 @@ import {
   parseRepositoryInput,
   requireAuthenticatedUser,
   requireEntityRow,
+  verifyCompanyOperator,
 } from './helpers';
 
 export const COMPANY_SELF_SELECT_COLUMNS = [
@@ -189,6 +190,7 @@ export function createCompanyRepository(client: SupabaseClient): MobileCompanyRe
         let query = client
           .from('companies')
           .select(COMPANY_SELF_SELECT_COLUMNS)
+          .neq('status', 'suspended')
           .is('deleted_at', null);
 
         if (memberCompanyIds.length > 0) {
@@ -202,24 +204,51 @@ export function createCompanyRepository(client: SupabaseClient): MobileCompanyRe
           .order('id', { ascending: false })
           .limit(safeLimit);
 
-        const rows = await assertSupabaseResult(result);
-        return (rows ?? []) as unknown as CompanyRow[];
+        const rows = ((await assertSupabaseResult(result)) ?? []) as unknown as CompanyRow[];
+        const memberCompanyIdSet = new Set(memberCompanyIds);
+        return rows.filter(
+          (row) =>
+            row.status !== 'suspended' &&
+            (row.owner_id === user.id || memberCompanyIdSet.has(row.id)),
+        );
       });
     },
 
+    /**
+     * Fetches full operator-scoped company record (including registration_number & admin feedback)
+     * strictly after verifying ownership or active membership. Non-operators receive `null` and
+     * must query `directory.repository.getPublicCompanyById` (`public_companies_directory`) instead.
+     */
     async getOperatedCompanyById(companyId: string): Promise<CompanyRow | null> {
       const validId = parseRepositoryInput(uuidSchema, companyId);
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
-        const result = await client
+        const user = await requireAuthenticatedUser(client);
+        const access = await verifyCompanyOperator(client, user.id, validId);
+        if (!access.isOperator) {
+          return null;
+        }
+
+        let query = client
           .from('companies')
           .select(COMPANY_SELF_SELECT_COLUMNS)
           .eq('id', validId)
-          .is('deleted_at', null)
-          .maybeSingle<CompanyRow>();
+          .neq('status', 'suspended')
+          .is('deleted_at', null);
 
-        return (await assertSupabaseResult(result)) ?? null;
+        if (!access.isActiveMember) {
+          query = query.eq('owner_id', user.id);
+        }
+
+        const result = await query.maybeSingle<CompanyRow>();
+        const company = (await assertSupabaseResult(result)) ?? null;
+        if (!company || company.status === 'suspended') {
+          return null;
+        }
+        if (!access.isActiveMember && company.owner_id !== user.id) {
+          return null;
+        }
+        return company;
       });
     },
 

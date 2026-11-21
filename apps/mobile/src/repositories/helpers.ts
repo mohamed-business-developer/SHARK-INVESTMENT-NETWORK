@@ -37,6 +37,61 @@ export async function requireAuthenticatedUser(client: SupabaseClient): Promise<
   return data.user;
 }
 
+export interface VerifiedCompanyOperatorStatus {
+  readonly isOperator: boolean;
+  readonly isOwner: boolean;
+  readonly isActiveMember: boolean;
+}
+
+/**
+ * Verifies live operator authorization for `companyId` via PostgreSQL `public.is_company_operator(uuid)`
+ * paired with direct ownership / active membership checks. Fails closed on errors or suspended status.
+ */
+export async function verifyCompanyOperator(
+  client: SupabaseClient,
+  userId: string,
+  companyId: string,
+): Promise<VerifiedCompanyOperatorStatus> {
+  const rpcResult = await client.rpc('is_company_operator', {
+    target_company_id: companyId,
+  });
+  if (rpcResult.error || rpcResult.data !== true) {
+    return { isOperator: false, isOwner: false, isActiveMember: false };
+  }
+
+  const companyCheck = await client
+    .from('companies')
+    .select('id, owner_id, status')
+    .eq('id', companyId)
+    .neq('status', 'suspended')
+    .is('deleted_at', null)
+    .maybeSingle<{ readonly id: string; readonly owner_id: string; readonly status: string }>();
+
+  if (companyCheck.error || !companyCheck.data || companyCheck.data.status === 'suspended') {
+    return { isOperator: false, isOwner: false, isActiveMember: false };
+  }
+
+  if (companyCheck.data.owner_id === userId) {
+    return { isOperator: true, isOwner: true, isActiveMember: false };
+  }
+
+  const membershipCheck = await client
+    .from('company_members')
+    .select('id')
+    .eq('company_id', companyId)
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .is('deleted_at', null)
+    .maybeSingle<{ readonly id: string }>();
+
+  const isActiveMember = !membershipCheck.error && Boolean(membershipCheck.data);
+  return {
+    isOperator: isActiveMember,
+    isOwner: false,
+    isActiveMember,
+  };
+}
+
 export function requireEntityRow<T>(
   value: T | null | undefined,
   messageKey: 'errors.entityNotFound' | 'errors.profileNotFound' = 'errors.entityNotFound',
