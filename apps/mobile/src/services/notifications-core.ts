@@ -296,6 +296,16 @@ export interface PushLifecycleState {
   readonly activeUserId: string | null;
 }
 
+interface PendingPushRegistration {
+  readonly generation: number;
+  readonly abortController: AbortController;
+  readonly completion: Promise<{
+    readonly committedToken: string | null;
+    readonly committedUserId: string | null;
+  }>;
+  claimedBySignOut: boolean;
+}
+
 export interface PushLifecycleCoordinator {
   readonly getState: () => PushLifecycleState;
   readonly invalidate: () => number;
@@ -305,29 +315,38 @@ export interface PushLifecycleCoordinator {
     readonly driver: PushNotificationDriver;
     readonly registerToken: (
       input: RegisterDeviceTokenCommand,
+      options?: { readonly signal?: AbortSignal },
     ) => Promise<DeviceTokenRegistrationResult>;
+    readonly deactivateToken?: (expoPushToken: string) => Promise<number>;
+    readonly verifyActiveUser?: () => Promise<string | null>;
     readonly isCurrentSession?: () => boolean;
   }) => Promise<PushRegistrationSyncResult>;
   readonly deactivateOnSignOut: (params: {
     readonly deactivateToken: (expoPushToken: string) => Promise<number>;
-    readonly expectedUserId?: string | null;
+    readonly verifyActiveUser?: () => Promise<string | null>;
     readonly timeoutMs?: number;
   }) => Promise<number>;
 }
 
 /**
- * Coordinates async push token registration with monotonic generation cancellation so stale
- * async registrations from a signed-out or previous user can never overwrite newer session state.
+ * Coordinates async push token registration with AbortSignal cancellation, monotonic generation
+ * invalidation, and server-verified pre-signOut compensation so stale registrations cannot silently
+ * overwrite active session state or use a subsequent user's credentials to alter prior user rows.
  */
 export function createPushLifecycleCoordinator(): PushLifecycleCoordinator {
   let generation = 0;
   let activeToken: string | null = null;
   let activeUserId: string | null = null;
+  let pending: PendingPushRegistration | null = null;
 
   const invalidate = (): number => {
     generation += 1;
     activeToken = null;
     activeUserId = null;
+    if (pending) {
+      pending.abortController.abort();
+      pending = null;
+    }
     return generation;
   };
 
@@ -356,6 +375,29 @@ export function createPushLifecycleCoordinator(): PushLifecycleCoordinator {
         };
       }
 
+      const abortController = new AbortController();
+      let resolveCompletion!: (value: {
+        readonly committedToken: string | null;
+        readonly committedUserId: string | null;
+      }) => void;
+      const completion = new Promise<{
+        readonly committedToken: string | null;
+        readonly committedUserId: string | null;
+      }>((resolve) => {
+        resolveCompletion = resolve;
+      });
+
+      const currentPending: PendingPushRegistration = {
+        generation: expectedGen,
+        abortController,
+        completion,
+        claimedBySignOut: false,
+      };
+      pending = currentPending;
+
+      let committedToken: string | null = null;
+      let committedUserId: string | null = null;
+
       try {
         const token = await params.driver.requestPermissionsAndGetToken();
         if (isStale()) {
@@ -371,32 +413,61 @@ export function createPushLifecycleCoordinator(): PushLifecycleCoordinator {
           };
         }
 
-        const result = await params.registerToken({
-          expo_push_token: token,
-          platform: params.driver.platform,
-          device_id: params.driver.deviceId,
-          app_version: params.driver.appVersion,
-          locale: params.driver.locale,
-        });
+        const result = await params.registerToken(
+          {
+            expo_push_token: token,
+            platform: params.driver.platform,
+            device_id: params.driver.deviceId,
+            app_version: params.driver.appVersion,
+            locale: params.driver.locale,
+          },
+          { signal: abortController.signal },
+        );
 
-        if (isStale()) {
+        if (result.status === 'degraded_conflict') {
+          if (!isStale()) {
+            activeToken = null;
+            activeUserId = null;
+            return {
+              pushStatus: 'token_conflict_degraded',
+              activeToken: null,
+            };
+          }
           return {
             pushStatus: 'idle',
             activeToken: null,
           };
         }
 
-        if (result.status === 'degraded_conflict') {
-          activeToken = null;
-          activeUserId = null;
+        committedToken = result.token.expo_push_token;
+        committedUserId = result.token.user_id;
+
+        if (isStale()) {
+          // Stale completion after signOut/switch: compensate ONLY if signOut didn't already claim cleanup
+          // AND live server auth still verifies caller IS the token row owner (never User B's session).
+          if (
+            !currentPending.claimedBySignOut &&
+            params.deactivateToken &&
+            params.verifyActiveUser
+          ) {
+            try {
+              const verifiedUid = await params.verifyActiveUser();
+              if (verifiedUid && verifiedUid === committedUserId) {
+                await params.deactivateToken(committedToken);
+                committedToken = null;
+              }
+            } catch {
+              // Fail closed on cleanup verification/network error without throwing late unhandled error.
+            }
+          }
           return {
-            pushStatus: 'token_conflict_degraded',
+            pushStatus: 'idle',
             activeToken: null,
           };
         }
 
         activeToken = result.token.expo_push_token;
-        activeUserId = params.userId;
+        activeUserId = result.token.user_id;
         return {
           pushStatus: 'active',
           activeToken: result.token.expo_push_token,
@@ -415,27 +486,58 @@ export function createPushLifecycleCoordinator(): PushLifecycleCoordinator {
           pushStatus: 'degraded_error',
           activeToken: null,
         };
+      } finally {
+        if (pending === currentPending) {
+          pending = null;
+        }
+        resolveCompletion({ committedToken, committedUserId });
       }
     },
 
     async deactivateOnSignOut(params): Promise<number> {
       const tokenToDeactivate = activeToken;
       const ownerUserId = activeUserId;
-      // Clear memory and bump generation synchronously so any in-flight registration aborts cleanly.
+      const pendingWork = pending;
+      if (pendingWork) {
+        pendingWork.claimedBySignOut = true;
+      }
+
+      // Synchronously bump generation, clear memory state, and abort in-flight registration HTTP request.
       invalidate();
 
-      if (!tokenToDeactivate) {
-        return 0;
-      }
-      if (params.expectedUserId && ownerUserId && params.expectedUserId !== ownerUserId) {
+      if (!tokenToDeactivate && !pendingWork) {
         return 0;
       }
 
-      let count = 0;
+      let deactivatedCount = 0;
       await runBoundedPushDeactivation(async () => {
-        count = await params.deactivateToken(tokenToDeactivate);
+        const verifiedUidBefore = params.verifyActiveUser ? await params.verifyActiveUser() : null;
+
+        if (
+          tokenToDeactivate &&
+          (!params.verifyActiveUser || (verifiedUidBefore && verifiedUidBefore === ownerUserId))
+        ) {
+          deactivatedCount += await params.deactivateToken(tokenToDeactivate);
+        }
+
+        if (pendingWork) {
+          const settled = await pendingWork.completion;
+          if (settled.committedToken && settled.committedToken !== tokenToDeactivate) {
+            // Re-verify live server auth user (never trust client userId) before compensating while User A session is still open.
+            const verifiedUidAfter = params.verifyActiveUser
+              ? await params.verifyActiveUser()
+              : verifiedUidBefore;
+            if (
+              !params.verifyActiveUser ||
+              (verifiedUidAfter && verifiedUidAfter === settled.committedUserId)
+            ) {
+              deactivatedCount += await params.deactivateToken(settled.committedToken);
+            }
+          }
+        }
       }, params.timeoutMs ?? 500);
-      return count;
+
+      return deactivatedCount;
     },
   };
 }
@@ -446,7 +548,10 @@ export async function syncDevicePushRegistration(params: {
   readonly driver: PushNotificationDriver;
   readonly registerToken: (
     input: RegisterDeviceTokenCommand,
+    options?: { readonly signal?: AbortSignal },
   ) => Promise<DeviceTokenRegistrationResult>;
+  readonly deactivateToken?: (expoPushToken: string) => Promise<number>;
+  readonly verifyActiveUser?: () => Promise<string | null>;
   readonly isCurrentSession?: () => boolean;
 }): Promise<PushRegistrationSyncResult> {
   return createPushLifecycleCoordinator().syncRegistration(params);

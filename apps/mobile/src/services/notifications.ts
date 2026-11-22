@@ -146,6 +146,18 @@ export function createNativePushNotificationDriver(locale: AppLocale): PushNotif
   };
 }
 
+async function verifyCurrentAuthenticatedUserId(client: SupabaseClient): Promise<string | null> {
+  try {
+    const { data, error } = await client.auth.getUser();
+    if (error || !data.user) {
+      return null;
+    }
+    return data.user.id;
+  } catch {
+    return null;
+  }
+}
+
 export async function syncNativeDevicePushRegistration(params: {
   readonly client: SupabaseClient;
   readonly userId: string;
@@ -158,24 +170,26 @@ export async function syncNativeDevicePushRegistration(params: {
     userId: params.userId,
     accountStatus: params.accountStatus,
     driver: createNativePushNotificationDriver(params.locale),
-    registerToken: (input) => repo.registerDeviceToken(input),
+    registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+    deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+    verifyActiveUser: () => verifyCurrentAuthenticatedUserId(params.client),
     isCurrentSession: params.isCurrentSession,
   });
 }
 
 /**
  * Best-effort deactivation of ONLY the current device's registered push token before sign-out.
- * Synchronously invalidates push lifecycle state so any in-flight registration cannot restore stale tokens.
+ * Synchronously invalidates and aborts in-flight registrations, verifies live server session user
+ * via Supabase `auth.getUser()`, and never trusts client-supplied user IDs or User B sessions.
  */
 export async function bestEffortDeactivatePushTokensOnSignOut(
   client: SupabaseClient,
-  expectedUserId?: string | null,
   timeoutMs = 500,
 ): Promise<void> {
   const repo = createNotificationRepository(client);
   await defaultPushCoordinator.deactivateOnSignOut({
     deactivateToken: (expoPushToken) => repo.deactivateDeviceToken(expoPushToken),
-    expectedUserId,
+    verifyActiveUser: () => verifyCurrentAuthenticatedUserId(client),
     timeoutMs,
   });
 }

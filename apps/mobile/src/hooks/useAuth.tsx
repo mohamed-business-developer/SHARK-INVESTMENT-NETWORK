@@ -240,13 +240,12 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async (): Promise<void> => {
-    const activeUserId = authState.user?.id ?? null;
     queryClient.clear();
     setSentryUserId(null);
     await mobileAnalytics.reset();
     const client = tryGetMobileSupabaseClient();
     if (client) {
-      await bestEffortDeactivatePushTokensOnSignOut(client, activeUserId);
+      await bestEffortDeactivatePushTokensOnSignOut(client);
       await createAuthRepository(client).signOut();
     } else {
       invalidatePushLifecycle();
@@ -254,7 +253,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
     const guest = createInitialGuestAuthState({ status: 'guest' });
     statusRef.current = guest.status;
     setAuthState(guest);
-  }, [authState.user?.id, queryClient]);
+  }, [queryClient]);
 
   const deleteOwnAccount = useCallback(
     async (input: DeleteOwnAccountRequest): Promise<void> => {

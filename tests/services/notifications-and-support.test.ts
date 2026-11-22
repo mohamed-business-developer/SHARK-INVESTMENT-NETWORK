@@ -471,7 +471,7 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
       expect(
         await coordinatorNoToken.deactivateOnSignOut({
           deactivateToken: deactivateSpy,
-          expectedUserId: USER_A,
+          verifyActiveUser: async () => USER_A,
         }),
       ).toBe(0);
       expect(deactivateSpy).not.toHaveBeenCalled();
@@ -552,7 +552,7 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
 
       const deactivatedCount = await coordinator.deactivateOnSignOut({
         deactivateToken: (tok) => repoA.deactivateDeviceToken(tok),
-        expectedUserId: USER_A,
+        verifyActiveUser: async () => USER_A,
       });
       expect(deactivatedCount).toBe(1);
       expect(coordinator.getState().activeToken).toBeNull();
@@ -621,10 +621,13 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
         },
       });
 
-      await raceCoordinator.deactivateOnSignOut({
+      const staleSignOut = raceCoordinator.deactivateOnSignOut({
         deactivateToken: vi.fn(async () => 0),
-        expectedUserId: USER_A,
+        verifyActiveUser: async () => USER_A,
+        timeoutMs: 25,
       });
+      await vi.advanceTimersByTimeAsync(40);
+      await staleSignOut;
       resolveUserAPerm(SHARED_TOKEN);
       const staleLogoutOutcome = await pendingUserAPromise;
       expect(staleLogoutOutcome).toEqual({ pushStatus: 'idle', activeToken: null });
@@ -752,6 +755,557 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('prevents and compensates stale delayed DB writes using stateful RLS DB checks without ever acting as User B on User A rows', async () => {
+    interface StatefulDeviceRow {
+      id: string;
+      user_id: string;
+      expo_push_token: string;
+      platform: 'android' | 'ios' | 'web';
+      device_id: string | null;
+      app_version: string | null;
+      locale: 'ar' | 'en';
+      is_active: boolean;
+      last_seen_at: string;
+      created_at: string;
+      updated_at: string;
+    }
+
+    const createStatefulRlsDb = () => {
+      let currentSessionUserId: string | null = USER_A;
+      let nextId = 1;
+      const rows: StatefulDeviceRow[] = [];
+      const crossUserAttempts: Array<{ actor: string | null; targetOwner: string; op: string }> =
+        [];
+
+      let delayedGate: Promise<void> | null = null;
+      let rejectGateOnAbort = true;
+      let onInsertDispatched: (() => void) | null = null;
+
+      const client = {
+        auth: {
+          getUser: async () =>
+            currentSessionUserId
+              ? {
+                  data: {
+                    user: { id: currentSessionUserId, email: `${currentSessionUserId}@shark.test` },
+                  },
+                  error: null,
+                }
+              : { data: { user: null }, error: null },
+        },
+        from(table: string) {
+          const opState: {
+            op: 'select' | 'insert' | 'update';
+            payload?: Record<string, unknown>;
+            filters: Record<string, unknown>;
+            signal?: AbortSignal;
+          } = {
+            op: 'select',
+            filters: {},
+          };
+
+          const execute = async (): Promise<{ data: unknown; error: unknown }> => {
+            if (table !== 'device_tokens') {
+              return { data: null, error: null };
+            }
+            const actorUid = currentSessionUserId;
+
+            // Only delay the INSERT write for USER_A when test installs a delayedGate
+            if (opState.op === 'insert' && actorUid === USER_A && delayedGate) {
+              const capturedActor = actorUid;
+              const gate = delayedGate;
+              const signal = opState.signal;
+              onInsertDispatched?.();
+              onInsertDispatched = null;
+              await new Promise<void>((resolve, reject) => {
+                let done = false;
+                const onAbort = () => {
+                  if (done || !rejectGateOnAbort) {
+                    return;
+                  }
+                  done = true;
+                  reject(new DOMException('The operation was aborted', 'AbortError'));
+                };
+                if (signal?.aborted && rejectGateOnAbort) {
+                  onAbort();
+                  return;
+                }
+                signal?.addEventListener('abort', onAbort, { once: true });
+                void gate.then(() => {
+                  if (!done) {
+                    done = true;
+                    signal?.removeEventListener('abort', onAbort);
+                    resolve();
+                  }
+                });
+              });
+
+              const payload = opState.payload!;
+              const token = String(payload.expo_push_token);
+              if (rows.some((r) => r.expo_push_token === token)) {
+                return { data: null, error: { code: '23505', message: 'duplicate key' } };
+              }
+              const inserted: StatefulDeviceRow = {
+                id: `dev-${nextId++}`,
+                user_id: capturedActor,
+                expo_push_token: token,
+                platform: payload.platform as 'android',
+                device_id: (payload.device_id as string | null) ?? null,
+                app_version: (payload.app_version as string | null) ?? null,
+                locale: payload.locale as 'ar',
+                is_active: true,
+                last_seen_at: String(payload.last_seen_at),
+                created_at: String(payload.last_seen_at),
+                updated_at: String(payload.last_seen_at),
+              };
+              rows.push(inserted);
+              return { data: inserted, error: null };
+            }
+
+            if (opState.op === 'select') {
+              const match = rows.find(
+                (r) =>
+                  r.user_id === actorUid &&
+                  (!opState.filters.expo_push_token ||
+                    r.expo_push_token === opState.filters.expo_push_token),
+              );
+              return { data: match ?? null, error: null };
+            }
+
+            if (opState.op === 'insert') {
+              if (!actorUid) {
+                return { data: null, error: { code: '42501', message: 'unauthenticated' } };
+              }
+              const payload = opState.payload!;
+              const token = String(payload.expo_push_token);
+              if (rows.some((r) => r.expo_push_token === token)) {
+                return { data: null, error: { code: '23505', message: 'duplicate key' } };
+              }
+              const inserted: StatefulDeviceRow = {
+                id: `dev-${nextId++}`,
+                user_id: actorUid,
+                expo_push_token: token,
+                platform: payload.platform as 'android',
+                device_id: (payload.device_id as string | null) ?? null,
+                app_version: (payload.app_version as string | null) ?? null,
+                locale: payload.locale as 'ar',
+                is_active: true,
+                last_seen_at: String(payload.last_seen_at),
+                created_at: String(payload.last_seen_at),
+                updated_at: String(payload.last_seen_at),
+              };
+              rows.push(inserted);
+              return { data: inserted, error: null };
+            }
+
+            if (opState.op === 'update') {
+              const targetByToken = rows.filter(
+                (r) =>
+                  !opState.filters.expo_push_token ||
+                  r.expo_push_token === opState.filters.expo_push_token,
+              );
+              for (const candidate of targetByToken) {
+                if (candidate.user_id !== actorUid) {
+                  crossUserAttempts.push({
+                    actor: actorUid,
+                    targetOwner: candidate.user_id,
+                    op: 'update',
+                  });
+                }
+              }
+              const updated: StatefulDeviceRow[] = [];
+              for (const row of rows) {
+                const matchUser = row.user_id === actorUid && opState.filters.user_id === actorUid;
+                const matchToken =
+                  !opState.filters.expo_push_token ||
+                  row.expo_push_token === opState.filters.expo_push_token;
+                const matchActive =
+                  opState.filters.is_active === undefined ||
+                  row.is_active === opState.filters.is_active;
+                if (matchUser && matchToken && matchActive) {
+                  Object.assign(row, opState.payload);
+                  updated.push(row);
+                }
+              }
+              return { data: updated, error: null };
+            }
+
+            return { data: null, error: null };
+          };
+
+          const builder = {
+            select() {
+              return builder;
+            },
+            insert(payload: Record<string, unknown>) {
+              opState.op = 'insert';
+              opState.payload = payload;
+              return builder;
+            },
+            update(payload: Record<string, unknown>) {
+              opState.op = 'update';
+              opState.payload = payload;
+              return builder;
+            },
+            eq(col: string, val: unknown) {
+              opState.filters[col] = val;
+              return builder;
+            },
+            abortSignal(signal: AbortSignal) {
+              opState.signal = signal;
+              return builder;
+            },
+            maybeSingle: () => execute(),
+            single: () => execute(),
+            then(
+              onFulfilled?: (v: { data: unknown; error: unknown }) => unknown,
+              onRejected?: (reason: unknown) => unknown,
+            ) {
+              return execute().then(onFulfilled, onRejected);
+            },
+          };
+
+          return builder;
+        },
+      };
+
+      return {
+        client: client as unknown as Parameters<typeof createNotificationRepository>[0],
+        rows,
+        crossUserAttempts,
+        setSessionUser: (uid: string | null) => {
+          currentSessionUserId = uid;
+        },
+        setDelay: (gate: Promise<void> | null, abortable = true, onDispatched?: () => void) => {
+          delayedGate = gate;
+          rejectGateOnAbort = abortable;
+          onInsertDispatched = onDispatched ?? null;
+        },
+      };
+    };
+
+    const verifyUid = async (c: Parameters<typeof createNotificationRepository>[0]) => {
+      const { data } = await c.auth.getUser();
+      return data.user?.id ?? null;
+    };
+
+    // --- Scenario A: AbortSignal cancels User A's delayed write on signOut before DB commit -> User A row stays inactive/absent, User B active ---
+    {
+      const db = createStatefulRlsDb();
+      const repo = createNotificationRepository(db.client);
+      const coordinator = createPushLifecycleCoordinator();
+
+      let releaseDelayedInsert!: () => void;
+      db.setDelay(
+        new Promise<void>((r) => {
+          releaseDelayedInsert = r;
+        }),
+        true,
+      );
+
+      const userATask = coordinator.syncRegistration({
+        userId: USER_A,
+        accountStatus: 'approved',
+        driver: createFakeDriver({ requestPermissionsAndGetToken: async () => SHARED_TOKEN }),
+        registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser: () => verifyUid(db.client),
+      });
+      await Promise.resolve();
+
+      // User A signs out -> aborts delayed request before JWT purge, then clears session and switches to User B
+      await coordinator.deactivateOnSignOut({
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser: () => verifyUid(db.client),
+      });
+      db.setSessionUser(USER_B);
+      db.setDelay(null);
+      releaseDelayedInsert();
+
+      const USER_B_TOKEN = 'ExponentPushToken[user_b_own_device_88888]';
+      const userBRes = await coordinator.syncRegistration({
+        userId: USER_B,
+        accountStatus: 'approved',
+        driver: createFakeDriver({ requestPermissionsAndGetToken: async () => USER_B_TOKEN }),
+        registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser: () => verifyUid(db.client),
+      });
+      expect(await userATask).toEqual({ pushStatus: 'idle', activeToken: null });
+      expect(userBRes).toEqual({ pushStatus: 'active', activeToken: USER_B_TOKEN });
+      expect(db.rows.filter((r) => r.user_id === USER_A && r.is_active)).toHaveLength(0);
+      expect(db.rows.filter((r) => r.user_id === USER_B && r.is_active)).toHaveLength(1);
+      expect(db.crossUserAttempts).toHaveLength(0);
+    }
+
+    // --- Scenario B: DB already committed in-flight write despite abort inside signOut window -> User A session compensates BEFORE User B signs in ---
+    {
+      const db = createStatefulRlsDb();
+      const repo = createNotificationRepository(db.client);
+      const coordinator = createPushLifecycleCoordinator();
+
+      let releaseDelayedInsert!: () => void;
+      let markInsertDispatched!: () => void;
+      const insertDispatched = new Promise<void>((r) => {
+        markInsertDispatched = r;
+      });
+      db.setDelay(
+        new Promise<void>((r) => {
+          releaseDelayedInsert = r;
+        }),
+        false, // DB commits despite client abortSignal
+        markInsertDispatched,
+      );
+
+      const userATask = coordinator.syncRegistration({
+        userId: USER_A,
+        accountStatus: 'approved',
+        driver: createFakeDriver({ requestPermissionsAndGetToken: async () => SHARED_TOKEN }),
+        registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser: () => verifyUid(db.client),
+      });
+      await insertDispatched;
+
+      // SignOut begins while User A JWT is still live; delayed DB commit settles shortly after -> compensated as User A
+      const signOutPromise = coordinator.deactivateOnSignOut({
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser: () => verifyUid(db.client),
+        timeoutMs: 500,
+      });
+      releaseDelayedInsert();
+      const compensated = await signOutPromise;
+      expect(compensated).toBe(1);
+      expect(await userATask).toEqual({ pushStatus: 'idle', activeToken: null });
+
+      // Session now clears and User B becomes active cleanly
+      db.setSessionUser(USER_B);
+      db.setDelay(null);
+      const USER_B_TOKEN = 'ExponentPushToken[user_b_compensated_99999]';
+      await coordinator.syncRegistration({
+        userId: USER_B,
+        accountStatus: 'approved',
+        driver: createFakeDriver({ requestPermissionsAndGetToken: async () => USER_B_TOKEN }),
+        registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser: () => verifyUid(db.client),
+      });
+
+      const userARows = db.rows.filter((r) => r.user_id === USER_A);
+      const userBRows = db.rows.filter((r) => r.user_id === USER_B);
+      expect(userARows).toHaveLength(1);
+      expect(userARows[0]?.is_active).toBe(false);
+      expect(userBRows).toHaveLength(1);
+      expect(userBRows[0]?.is_active).toBe(true);
+      expect(userBRows[0]?.expo_push_token).toBe(USER_B_TOKEN);
+      expect(db.crossUserAttempts).toHaveLength(0);
+    }
+
+    // --- Scenario C: Stale write exceeds signOut timeout & completes AFTER User B is active -> NEVER uses User B session on User A row & protects User B state ---
+    {
+      vi.useFakeTimers();
+      try {
+        const db = createStatefulRlsDb();
+        const repo = createNotificationRepository(db.client);
+        const coordinator = createPushLifecycleCoordinator();
+
+        let releaseVeryLateInsert!: () => void;
+        let markVeryLateDispatched!: () => void;
+        const veryLateDispatched = new Promise<void>((r) => {
+          markVeryLateDispatched = r;
+        });
+        db.setDelay(
+          new Promise<void>((r) => {
+            releaseVeryLateInsert = r;
+          }),
+          false,
+          markVeryLateDispatched,
+        );
+
+        const userATask = coordinator.syncRegistration({
+          userId: USER_A,
+          accountStatus: 'approved',
+          driver: createFakeDriver({ requestPermissionsAndGetToken: async () => SHARED_TOKEN }),
+          registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+          deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+          verifyActiveUser: () => verifyUid(db.client),
+        });
+        await veryLateDispatched;
+
+        // Bounded signOut finishes at 50ms timeout without hanging forever
+        const signOutPromise = coordinator.deactivateOnSignOut({
+          deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+          verifyActiveUser: () => verifyUid(db.client),
+          timeoutMs: 50,
+        });
+        await vi.advanceTimersByTimeAsync(60);
+        await signOutPromise;
+
+        // Session switches to User B and User B activates on same client
+        db.setSessionUser(USER_B);
+        db.setDelay(null);
+        const USER_B_TOKEN = 'ExponentPushToken[user_b_isolated_77777]';
+        const userBResult = await coordinator.syncRegistration({
+          userId: USER_B,
+          accountStatus: 'approved',
+          driver: createFakeDriver({ requestPermissionsAndGetToken: async () => USER_B_TOKEN }),
+          registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+          deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+          verifyActiveUser: () => verifyUid(db.client),
+        });
+        expect(userBResult).toEqual({ pushStatus: 'active', activeToken: USER_B_TOKEN });
+
+        // Now User A's very-late server write finally returns while User B is signed in
+        releaseVeryLateInsert();
+        expect(await userATask).toEqual({ pushStatus: 'idle', activeToken: null });
+
+        // User B's in-memory token, DB record, and session remain untouched; zero cross-user cleanup calls occurred
+        expect(coordinator.getState().activeUserId).toBe(USER_B);
+        expect(coordinator.getState().activeToken).toBe(USER_B_TOKEN);
+        expect(db.rows.find((r) => r.user_id === USER_B)?.is_active).toBe(true);
+        expect(db.crossUserAttempts).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it('handles delayed-write failures after User A signOut and User B activation cleanly with zero active User A tokens and untouched User B records', async () => {
+    let currentUid: string | null = USER_A;
+    const dbRows: { id: string; user_id: string; expo_push_token: string; is_active: boolean }[] =
+      [];
+    const userBUpdateAttemptsOnA: string[] = [];
+
+    let rejectUserADelayedWrite!: (err: unknown) => void;
+    let notifyFailInsertDispatched!: () => void;
+    const failInsertDispatched = new Promise<void>((r) => {
+      notifyFailInsertDispatched = r;
+    });
+
+    const repoClient = {
+      auth: {
+        getUser: async () =>
+          currentUid
+            ? { data: { user: { id: currentUid, email: `${currentUid}@shark.test` } }, error: null }
+            : { data: { user: null }, error: null },
+      },
+      from() {
+        let op = 'select';
+        let payload: Record<string, unknown> = {};
+        const filters: Record<string, unknown> = {};
+
+        const finish = async (): Promise<{ data: unknown; error: unknown }> => {
+          if (op === 'select') {
+            return { data: null, error: null };
+          }
+          if (op === 'insert' && currentUid === USER_A) {
+            return new Promise((_, reject) => {
+              rejectUserADelayedWrite = reject;
+              notifyFailInsertDispatched();
+            });
+          }
+          if (op === 'insert' && currentUid === USER_B) {
+            const row = {
+              id: 'b-fail-path',
+              user_id: USER_B,
+              expo_push_token: String(payload.expo_push_token),
+              is_active: true,
+            };
+            dbRows.push(row);
+            return { data: row, error: null };
+          }
+          if (op === 'update') {
+            if (filters.user_id !== currentUid) {
+              userBUpdateAttemptsOnA.push(String(filters.user_id));
+            }
+            return { data: [], error: null };
+          }
+          return { data: null, error: null };
+        };
+
+        const b = {
+          select: () => b,
+          insert(p: Record<string, unknown>) {
+            op = 'insert';
+            payload = p;
+            return b;
+          },
+          update(p: Record<string, unknown>) {
+            op = 'update';
+            payload = p;
+            return b;
+          },
+          eq(c: string, v: unknown) {
+            filters[c] = v;
+            return b;
+          },
+          abortSignal: () => b,
+          maybeSingle: () => finish(),
+          single: () => finish(),
+          then(
+            onFulfilled?: (v: { data: unknown; error: unknown }) => unknown,
+            onRejected?: (reason: unknown) => unknown,
+          ) {
+            return finish().then(onFulfilled, onRejected);
+          },
+        };
+        return b;
+      },
+    } as unknown as Parameters<typeof createNotificationRepository>[0];
+
+    const repo = createNotificationRepository(repoClient);
+    const coordinator = createPushLifecycleCoordinator();
+    const verifyActiveUser = async () => {
+      const { data } = await repoClient.auth.getUser();
+      return data.user?.id ?? null;
+    };
+
+    const userAPending = coordinator.syncRegistration({
+      userId: USER_A,
+      accountStatus: 'approved',
+      driver: createFakeDriver({ requestPermissionsAndGetToken: async () => SHARED_TOKEN }),
+      registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+      deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+      verifyActiveUser,
+    });
+    await failInsertDispatched;
+
+    vi.useFakeTimers();
+    try {
+      const signOutPromise = coordinator.deactivateOnSignOut({
+        deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+        verifyActiveUser,
+        timeoutMs: 30,
+      });
+      await vi.advanceTimersByTimeAsync(40);
+      await signOutPromise;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    currentUid = USER_B;
+    const USER_B_TOKEN = 'ExponentPushToken[user_b_after_fail_55555]';
+    const userBOutcome = await coordinator.syncRegistration({
+      userId: USER_B,
+      accountStatus: 'approved',
+      driver: createFakeDriver({ requestPermissionsAndGetToken: async () => USER_B_TOKEN }),
+      registerToken: (input, opts) => repo.registerDeviceToken(input, opts),
+      deactivateToken: (tok) => repo.deactivateDeviceToken(tok),
+      verifyActiveUser,
+    });
+    expect(userBOutcome).toEqual({ pushStatus: 'active', activeToken: USER_B_TOKEN });
+
+    // Now User A's delayed DB write rejects after User B is active
+    rejectUserADelayedWrite(new Error('network timeout'));
+    expect(await userAPending).toEqual({ pushStatus: 'idle', activeToken: null });
+
+    expect(dbRows.filter((r) => r.user_id === USER_A)).toHaveLength(0);
+    expect(dbRows.filter((r) => r.user_id === USER_B && r.is_active)).toHaveLength(1);
+    expect(coordinator.getState().activeUserId).toBe(USER_B);
+    expect(coordinator.getState().activeToken).toBe(USER_B_TOKEN);
+    expect(userBUpdateAttemptsOnA).toHaveLength(0);
   });
 
   it('subscribes to Realtime INSERT events for the signed-in user and cleans up channels cleanly on teardown', () => {

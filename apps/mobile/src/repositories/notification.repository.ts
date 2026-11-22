@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CursorPageResponse, DeviceTokenRow, NotificationCategory } from '@shark/shared-types';
-import { buildCursorPage } from '@shark/utils';
+import { AppDomainError, buildCursorPage } from '@shark/utils';
 import {
   expoPushTokenSchema,
   paginationQuerySchema,
@@ -83,8 +83,32 @@ export interface MobileNotificationRepository {
   readonly softDeleteNotification: (notificationId: string) => Promise<void>;
   readonly registerDeviceToken: (
     input: RegisterDeviceTokenInput,
+    options?: { readonly signal?: AbortSignal },
   ) => Promise<DeviceTokenRegistrationResult>;
   readonly deactivateDeviceToken: (expoPushToken?: string | null) => Promise<number>;
+}
+
+function throwIfRegistrationAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new AppDomainError({
+      code: 'ABORTED',
+      messageKey: 'errors.unexpected',
+      statusCode: 499,
+    });
+  }
+}
+
+function withOptionalAbortSignal<TQuery>(query: TQuery, signal?: AbortSignal): TQuery {
+  if (
+    signal &&
+    typeof query === 'object' &&
+    query !== null &&
+    'abortSignal' in query &&
+    typeof (query as { abortSignal?: unknown }).abortSignal === 'function'
+  ) {
+    return (query as { abortSignal: (abortSignal: AbortSignal) => TQuery }).abortSignal(signal);
+  }
+  return query;
 }
 
 function normalizeNotificationRow(row: MobileNotificationItem): MobileNotificationItem {
@@ -236,27 +260,36 @@ export function createNotificationRepository(client: SupabaseClient): MobileNoti
 
     async registerDeviceToken(
       input: RegisterDeviceTokenInput,
+      options?: { readonly signal?: AbortSignal },
     ): Promise<DeviceTokenRegistrationResult> {
       const parsed = parseRepositoryInput(registerDeviceTokenSchema, input);
 
       return executeServiceCall(async () => {
+        throwIfRegistrationAborted(options?.signal);
         const user = await requireAuthenticatedUser(client);
+        throwIfRegistrationAborted(options?.signal);
         const nowIso = new Date().toISOString();
 
         // Check strictly within caller's own RLS-scoped rows; never query other accounts.
-        const existingRes = await client
-          .from('device_tokens')
-          .select(DEVICE_TOKEN_SELECT_COLUMNS)
-          .eq('user_id', user.id)
-          .eq('expo_push_token', parsed.expo_push_token)
-          .maybeSingle();
+        const existingQuery = withOptionalAbortSignal(
+          client
+            .from('device_tokens')
+            .select(DEVICE_TOKEN_SELECT_COLUMNS)
+            .eq('user_id', user.id)
+            .eq('expo_push_token', parsed.expo_push_token)
+            .maybeSingle(),
+          options?.signal,
+        );
+        const existingRes = await existingQuery;
 
         const existingRow = (await assertSupabaseResult(
           existingRes,
         )) as unknown as DeviceTokenRow | null;
 
-        const writeResult = existingRow
-          ? await client
+        throwIfRegistrationAborted(options?.signal);
+
+        const writeQuery = existingRow
+          ? client
               .from('device_tokens')
               .update({
                 platform: parsed.platform,
@@ -270,7 +303,7 @@ export function createNotificationRepository(client: SupabaseClient): MobileNoti
               .eq('user_id', user.id)
               .select(DEVICE_TOKEN_SELECT_COLUMNS)
               .single()
-          : await client
+          : client
               .from('device_tokens')
               .insert({
                 user_id: user.id,
@@ -284,6 +317,8 @@ export function createNotificationRepository(client: SupabaseClient): MobileNoti
               })
               .select(DEVICE_TOKEN_SELECT_COLUMNS)
               .single();
+
+        const writeResult = await withOptionalAbortSignal(writeQuery, options?.signal);
 
         if (writeResult.error) {
           const { code } = extractRawErrorCode(writeResult.error);
