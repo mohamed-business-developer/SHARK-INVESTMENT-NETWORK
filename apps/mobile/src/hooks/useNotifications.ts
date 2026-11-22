@@ -29,8 +29,8 @@ import {
   applyNotificationReadUpdate,
   applyNotificationSoftDelete,
   applyRealtimeNotificationInsert,
+  invalidatePushLifecycle,
   isInboxAndSupportAllowedStatus,
-  setActiveRegisteredPushToken,
   subscribeToNotificationResponseDeepLinks,
   subscribeToUserNotifications,
   syncNativeDevicePushRegistration,
@@ -347,24 +347,30 @@ export function usePushTokenLifecycleSync(): {
     let active = true;
 
     if (!allowed || !userId) {
-      setActiveRegisteredPushToken(null);
+      invalidatePushLifecycle();
       setPushStatus('idle');
-      return;
+      return () => {
+        active = false;
+      };
     }
 
     const client = tryGetMobileSupabaseClient();
     if (!client) {
+      invalidatePushLifecycle();
       setPushStatus('unavailable_or_denied');
-      return;
+      return () => {
+        active = false;
+      };
     }
 
-    setActiveRegisteredPushToken(null);
+    invalidatePushLifecycle();
     setPushStatus('registering');
     void syncNativeDevicePushRegistration({
       client,
       userId,
       accountStatus: status,
       locale,
+      isCurrentSession: () => active,
     }).then((result) => {
       if (active) {
         setPushStatus(result.pushStatus);
@@ -373,6 +379,7 @@ export function usePushTokenLifecycleSync(): {
 
     return () => {
       active = false;
+      invalidatePushLifecycle();
     };
   }, [allowed, locale, status, userId]);
 

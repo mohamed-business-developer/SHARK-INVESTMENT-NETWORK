@@ -22,7 +22,7 @@ import { createAuthRepository } from '@/repositories/auth.repository';
 import { mobileAnalytics } from '@/services/analytics';
 import {
   bestEffortDeactivatePushTokensOnSignOut,
-  setActiveRegisteredPushToken,
+  invalidatePushLifecycle,
 } from '@/services/notifications';
 import { setSentryUserId } from '@/services/sentry';
 import { registerRevokedAccessHandler, type RevokedAccessReason } from '@/services/service-client';
@@ -91,6 +91,9 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
       });
 
       if (seq === refreshSeqRef.current) {
+        if (next.status === 'guest' || next.status === 'suspended') {
+          invalidatePushLifecycle();
+        }
         statusRef.current = next.status;
         setAuthState(next);
       }
@@ -117,6 +120,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
           }
           if (event === 'SIGNED_OUT') {
             refreshSeqRef.current += 1;
+            invalidatePushLifecycle();
             queryClient.clear();
             const fallbackStatus = statusRef.current === 'suspended' ? 'suspended' : 'guest';
             const nextGuest = createInitialGuestAuthState({
@@ -236,26 +240,27 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async (): Promise<void> => {
+    const activeUserId = authState.user?.id ?? null;
     queryClient.clear();
     setSentryUserId(null);
     await mobileAnalytics.reset();
     const client = tryGetMobileSupabaseClient();
     if (client) {
-      await bestEffortDeactivatePushTokensOnSignOut(client);
+      await bestEffortDeactivatePushTokensOnSignOut(client, activeUserId);
       await createAuthRepository(client).signOut();
     } else {
-      setActiveRegisteredPushToken(null);
+      invalidatePushLifecycle();
     }
     const guest = createInitialGuestAuthState({ status: 'guest' });
     statusRef.current = guest.status;
     setAuthState(guest);
-  }, [queryClient]);
+  }, [authState.user?.id, queryClient]);
 
   const deleteOwnAccount = useCallback(
     async (input: DeleteOwnAccountRequest): Promise<void> => {
       await createAuthRepository(getMobileSupabaseClient()).deleteOwnAccount(input);
       queryClient.clear();
-      setActiveRegisteredPushToken(null);
+      invalidatePushLifecycle();
       setSentryUserId(null);
       await mobileAnalytics.reset();
       const guest = createInitialGuestAuthState({ status: 'guest' });

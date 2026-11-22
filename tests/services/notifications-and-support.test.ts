@@ -15,6 +15,7 @@ import {
   applyNotificationReadUpdate,
   applyNotificationSoftDelete,
   applyRealtimeNotificationInsert,
+  createPushLifecycleCoordinator,
   isInboxAndSupportAllowedStatus,
   normalizeRealtimeNotificationPayload,
   runBoundedPushDeactivation,
@@ -355,7 +356,7 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
     expect(allRead?.pages[0]?.items.every((item) => item.is_read)).toBe(true);
   });
 
-  it('handles 23505 and non-suspended 42501 push token ownership conflicts as non-fatal degraded states without exposing previous owner or bypassing RLS', async () => {
+  it('handles 23505 as degraded conflict while keeping 42501 fail-closed even for non-suspended profiles without exposing previous owner or bypassing RLS', async () => {
     // 1. 23505 unique constraint violation -> returns degraded_conflict with null token & zero prior owner metadata
     const conflict23505Mock = createTableMockClient({
       authUserId: USER_B,
@@ -390,41 +391,43 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
       reasonCode: 'PUSH_TOKEN_OWNERSHIP_CONFLICT',
       token: null,
     });
-    // Ensure client NEVER queries device_tokens without scoping to user_id = auth.uid()
+    expect('user_id' in conflictRes).toBe(false);
+    // Ensure client NEVER queries or updates device_tokens across other accounts
     expect(
       conflict23505Mock.logs.some((l) => l.table === 'device_tokens' && l.op === 'update'),
     ).toBe(false);
 
-    // 2. Non-suspended 42501 on device_tokens -> non-fatal degraded_conflict
-    const conflict42501Mock = createTableMockClient({
+    // 2. Arbitrary 42501 RLS/permission denial stays fail-closed (403 FORBIDDEN) EVEN if profile is active/approved
+    const perm42501Mock = createTableMockClient({
       authUserId: USER_B,
       resolver: (entry) => {
         if (entry.table === 'device_tokens' && entry.op === 'select') {
           return { data: null, error: null };
         }
         if (entry.table === 'device_tokens' && entry.op === 'insert') {
-          return { data: null, error: { code: '42501', message: 'new row violates RLS' } };
+          return {
+            data: null,
+            error: { code: '42501', message: 'new row violates row-level security policy' },
+          };
         }
         if (entry.table === 'profiles' && entry.op === 'select') {
-          return { data: { id: USER_B, account_status: 'pending' }, error: null };
+          return { data: { id: USER_B, account_status: 'approved' }, error: null };
         }
         return { data: null, error: null };
       },
     });
 
-    const syncRes = await syncDevicePushRegistration({
-      userId: USER_B,
-      accountStatus: 'pending',
-      driver: createFakeDriver(),
-      registerToken: (input) =>
-        createNotificationRepository(conflict42501Mock.client).registerDeviceToken(input),
-    });
-    expect(syncRes).toEqual({
-      pushStatus: 'token_conflict_degraded',
-      activeToken: null,
-    });
+    await expect(
+      createNotificationRepository(perm42501Mock.client).registerDeviceToken({
+        expo_push_token: SHARED_TOKEN,
+        platform: 'android',
+        locale: 'ar',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+    // Ensure repository never queried `profiles` to downgrade a 42501 into a token conflict
+    expect(perm42501Mock.logs.some((l) => l.table === 'profiles')).toBe(false);
 
-    // 3. Suspended 42501 (empty profile under is_not_suspended()) still fails closed with ACCOUNT_SUSPENDED
+    // 3. Suspended 42501 likewise remains fail-closed (403)
     const suspended42501Mock = createTableMockClient({
       authUserId: USER_B,
       resolver: (entry) => {
@@ -433,9 +436,6 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
         }
         if (entry.table === 'device_tokens' && entry.op === 'insert') {
           return { data: null, error: { code: '42501', message: 'RLS denied' } };
-        }
-        if (entry.table === 'profiles' && entry.op === 'select') {
-          return { data: null, error: null };
         }
         return { data: null, error: null };
       },
@@ -450,10 +450,33 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
   });
 
-  it('deactivates own device tokens on signOut without blocking offline/hanging calls, and handles account switching cleanly', async () => {
+  it('requires explicit current-device token on signOut deactivation, cancels stale async registrations across logout and account switches, and isolates multi-account tokens', async () => {
     vi.useFakeTimers();
     try {
-      // Guest and Suspended are strictly prevented from registering push tokens
+      // 1. Null, undefined, or malformed token on deactivateDeviceToken NEVER issues any UPDATE (multi-device safety)
+      const nullTokenMock = createTableMockClient({
+        authUserId: USER_A,
+        resolver: () => ({ data: [], error: null }),
+      });
+      const nullRepo = createNotificationRepository(nullTokenMock.client);
+      expect(await nullRepo.deactivateDeviceToken(null)).toBe(0);
+      expect(await nullRepo.deactivateDeviceToken(undefined)).toBe(0);
+      expect(await nullRepo.deactivateDeviceToken('')).toBe(0);
+      expect(await nullRepo.deactivateDeviceToken('invalid-token-format')).toBe(0);
+      expect(nullTokenMock.logs).toHaveLength(0);
+
+      // Coordinator with no active token on signOut issues zero DB deactivation updates
+      const coordinatorNoToken = createPushLifecycleCoordinator();
+      const deactivateSpy = vi.fn(async () => 1);
+      expect(
+        await coordinatorNoToken.deactivateOnSignOut({
+          deactivateToken: deactivateSpy,
+          expectedUserId: USER_A,
+        }),
+      ).toBe(0);
+      expect(deactivateSpy).not.toHaveBeenCalled();
+
+      // 2. Guest and Suspended are strictly prevented from registering push tokens
       const registerSpy = vi.fn();
       expect(
         await syncDevicePushRegistration({
@@ -473,7 +496,12 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
       ).toEqual({ pushStatus: 'unavailable_or_denied', activeToken: null });
       expect(registerSpy).not.toHaveBeenCalled();
 
-      // User A signs in -> registers active token -> signs out -> token deactivated strictly for User A
+      // 3. Explicit token deactivation targets ONLY (user_id, currentDeviceToken) and leaves other users untouched
+      const userADevices = new Map<string, { userId: string; isActive: boolean }>([
+        [SHARED_TOKEN, { userId: USER_A, isActive: true }],
+        ['ExponentPushToken[user_a_tablet_99999]', { userId: USER_A, isActive: true }],
+      ]);
+
       const userAMock = createTableMockClient({
         authUserId: USER_A,
         resolver: (entry) => {
@@ -499,35 +527,189 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
             };
           }
           if (entry.table === 'device_tokens' && entry.op === 'update') {
-            return { data: [{ id: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1' }], error: null };
+            const targetToken = String(entry.eqFilters.expo_push_token);
+            const row = userADevices.get(targetToken);
+            if (row && row.userId === entry.eqFilters.user_id && row.isActive) {
+              row.isActive = false;
+              return { data: [{ id: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1' }], error: null };
+            }
+            return { data: [], error: null };
           }
           return { data: null, error: null };
         },
       });
 
+      const coordinator = createPushLifecycleCoordinator();
       const repoA = createNotificationRepository(userAMock.client);
-      const userAReg = await syncDevicePushRegistration({
+      const userAReg = await coordinator.syncRegistration({
         userId: USER_A,
         accountStatus: 'approved',
         driver: createFakeDriver(),
         registerToken: (input) => repoA.registerDeviceToken(input),
       });
       expect(userAReg).toEqual({ pushStatus: 'active', activeToken: SHARED_TOKEN });
+      expect(coordinator.getState().activeToken).toBe(SHARED_TOKEN);
 
-      const deactivatedCount = await repoA.deactivateDeviceToken(SHARED_TOKEN);
-      expect(deactivatedCount).toBe(1);
-      const updateLog = userAMock.logs.find(
-        (l) => l.table === 'device_tokens' && l.op === 'update',
-      );
-      expect(updateLog?.eqFilters).toEqual({
-        user_id: USER_A,
-        is_active: true,
-        expo_push_token: SHARED_TOKEN,
+      const deactivatedCount = await coordinator.deactivateOnSignOut({
+        deactivateToken: (tok) => repoA.deactivateDeviceToken(tok),
+        expectedUserId: USER_A,
       });
-      expect((updateLog?.payload as Record<string, unknown>).is_active).toBe(false);
+      expect(deactivatedCount).toBe(1);
+      expect(coordinator.getState().activeToken).toBeNull();
+      expect(coordinator.getState().activeUserId).toBeNull();
+      expect(userADevices.get(SHARED_TOKEN)?.isActive).toBe(false);
+      // User A's secondary device token remains untouched
+      expect(userADevices.get('ExponentPushToken[user_a_tablet_99999]')?.isActive).toBe(true);
 
-      // Simulate switching from Account A (offline sign-out leaving token row owned by User A) to Account B:
-      // RLS blocks User B from reading/updating User A's row; UNIQUE token returns 23505 -> non-fatal degraded state.
+      // User B calling deactivateDeviceToken with User A's token cannot modify User A's record
+      const userBOwnedDeactivate = new Map<string, { userId: string; isActive: boolean }>([
+        [SHARED_TOKEN, { userId: USER_A, isActive: true }],
+      ]);
+      const userBDeactivateMock = createTableMockClient({
+        authUserId: USER_B,
+        resolver: (entry) => {
+          if (entry.table === 'device_tokens' && entry.op === 'update') {
+            expect(entry.eqFilters.user_id).toBe(USER_B);
+            const row = userBOwnedDeactivate.get(String(entry.eqFilters.expo_push_token));
+            if (row && row.userId === USER_B) {
+              row.isActive = false;
+              return { data: [{ id: 'row' }], error: null };
+            }
+            return { data: [], error: null };
+          }
+          return { data: null, error: null };
+        },
+      });
+      expect(
+        await createNotificationRepository(userBDeactivateMock.client).deactivateDeviceToken(
+          SHARED_TOKEN,
+        ),
+      ).toBe(0);
+      expect(userBOwnedDeactivate.get(SHARED_TOKEN)?.isActive).toBe(true);
+
+      // 4. Stale async registration race: User A starts registration, logs out BEFORE completion -> memory stays clean
+      let resolveUserAPerm!: (t: string | null) => void;
+      let registerCallsA = 0;
+      const raceCoordinator = createPushLifecycleCoordinator();
+      const pendingUserAPromise = raceCoordinator.syncRegistration({
+        userId: USER_A,
+        accountStatus: 'approved',
+        driver: createFakeDriver({
+          requestPermissionsAndGetToken: () =>
+            new Promise<string | null>((resolve) => {
+              resolveUserAPerm = resolve;
+            }),
+        }),
+        registerToken: async (input) => {
+          registerCallsA += 1;
+          return {
+            status: 'registered',
+            token: {
+              id: 't1',
+              user_id: USER_A,
+              expo_push_token: input.expo_push_token,
+              platform: input.platform,
+              device_id: input.device_id ?? null,
+              app_version: input.app_version ?? null,
+              locale: input.locale,
+              is_active: true,
+              last_seen_at: '2026-11-22T12:00:00Z',
+              created_at: '2026-11-22T12:00:00Z',
+              updated_at: '2026-11-22T12:00:00Z',
+            },
+          };
+        },
+      });
+
+      await raceCoordinator.deactivateOnSignOut({
+        deactivateToken: vi.fn(async () => 0),
+        expectedUserId: USER_A,
+      });
+      resolveUserAPerm(SHARED_TOKEN);
+      const staleLogoutOutcome = await pendingUserAPromise;
+      expect(staleLogoutOutcome).toEqual({ pushStatus: 'idle', activeToken: null });
+      expect(registerCallsA).toBe(0);
+      expect(raceCoordinator.getState().activeToken).toBeNull();
+      expect(raceCoordinator.getState().activeUserId).toBeNull();
+
+      // 5. Async registration race across account switch (User A HTTP write still pending while User B activates)
+      const USER_B_TOKEN = 'ExponentPushToken[user_b_unique_token_67890]';
+      let resolveUserADbInsert!: (res: {
+        status: 'registered';
+        token: {
+          id: string;
+          user_id: string;
+          expo_push_token: string;
+          platform: 'android';
+          device_id: null;
+          app_version: null;
+          locale: 'ar';
+          is_active: true;
+          last_seen_at: string;
+          created_at: string;
+          updated_at: string;
+        };
+      }) => void;
+
+      const userARacePromise = raceCoordinator.syncRegistration({
+        userId: USER_A,
+        accountStatus: 'approved',
+        driver: createFakeDriver(),
+        registerToken: () =>
+          new Promise((resolve) => {
+            resolveUserADbInsert = resolve;
+          }),
+      });
+      await Promise.resolve();
+
+      // User B becomes active immediately
+      const userBRaceResult = await raceCoordinator.syncRegistration({
+        userId: USER_B,
+        accountStatus: 'approved',
+        driver: createFakeDriver({
+          requestPermissionsAndGetToken: async () => USER_B_TOKEN,
+        }),
+        registerToken: async (input) => ({
+          status: 'registered',
+          token: {
+            id: 'tb',
+            user_id: USER_B,
+            expo_push_token: input.expo_push_token,
+            platform: input.platform,
+            device_id: null,
+            app_version: null,
+            locale: input.locale,
+            is_active: true,
+            last_seen_at: '2026-11-22T12:05:00Z',
+            created_at: '2026-11-22T12:05:00Z',
+            updated_at: '2026-11-22T12:05:00Z',
+          },
+        }),
+      });
+      expect(userBRaceResult).toEqual({ pushStatus: 'active', activeToken: USER_B_TOKEN });
+
+      // Now User A's stale DB response resolves -> MUST NOT overwrite User B's active token/user
+      resolveUserADbInsert({
+        status: 'registered',
+        token: {
+          id: 'ta',
+          user_id: USER_A,
+          expo_push_token: SHARED_TOKEN,
+          platform: 'android',
+          device_id: null,
+          app_version: null,
+          locale: 'ar',
+          is_active: true,
+          last_seen_at: '2026-11-22T12:00:00Z',
+          created_at: '2026-11-22T12:00:00Z',
+          updated_at: '2026-11-22T12:00:00Z',
+        },
+      });
+      expect(await userARacePromise).toEqual({ pushStatus: 'idle', activeToken: null });
+      expect(raceCoordinator.getState().activeToken).toBe(USER_B_TOKEN);
+      expect(raceCoordinator.getState().activeUserId).toBe(USER_B);
+
+      // 6. Account switching where Account A stays registered on server -> Account B receives 23505 non-fatal degraded conflict
       const sharedDeviceStore = new Map<string, string>([[SHARED_TOKEN, USER_A]]);
       const userBMock = createTableMockClient({
         authUserId: USER_B,
@@ -548,7 +730,7 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
           return { data: null, error: null };
         },
       });
-      const userBReg = await syncDevicePushRegistration({
+      const userBReg = await raceCoordinator.syncRegistration({
         userId: USER_B,
         accountStatus: 'approved',
         driver: createFakeDriver(),
@@ -556,9 +738,10 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
           createNotificationRepository(userBMock.client).registerDeviceToken(input),
       });
       expect(userBReg).toEqual({ pushStatus: 'token_conflict_degraded', activeToken: null });
+      expect(raceCoordinator.getState().activeToken).toBeNull();
       expect(sharedDeviceStore.get(SHARED_TOKEN)).toBe(USER_A);
 
-      // Hanging deactivation cannot block sign-out beyond bounded timeout
+      // 7. Hanging deactivation cannot block sign-out beyond bounded timeout
       let settled = false;
       const hangPromise = runBoundedPushDeactivation(() => new Promise(() => {}), 50).then(() => {
         settled = true;
@@ -715,6 +898,9 @@ describe('T5-15 Notifications, Push Tokens, Realtime Inbox & Support', () => {
       'utf8',
     );
     expect(useAuthSrc).toContain('bestEffortDeactivatePushTokensOnSignOut');
+    expect(useAuthSrc).toContain('invalidatePushLifecycle');
     expect(useNotificationsSrc).toContain('isInboxAndSupportAllowedStatus');
+    expect(useNotificationsSrc).toContain('invalidatePushLifecycle');
+    expect(useNotificationsSrc).toContain('isCurrentSession');
   });
 });

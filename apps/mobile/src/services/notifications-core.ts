@@ -290,6 +290,156 @@ export function applyNotificationSoftDelete(
   };
 }
 
+export interface PushLifecycleState {
+  readonly generation: number;
+  readonly activeToken: string | null;
+  readonly activeUserId: string | null;
+}
+
+export interface PushLifecycleCoordinator {
+  readonly getState: () => PushLifecycleState;
+  readonly invalidate: () => number;
+  readonly syncRegistration: (params: {
+    readonly userId: string;
+    readonly accountStatus: MobileAuthStatus;
+    readonly driver: PushNotificationDriver;
+    readonly registerToken: (
+      input: RegisterDeviceTokenCommand,
+    ) => Promise<DeviceTokenRegistrationResult>;
+    readonly isCurrentSession?: () => boolean;
+  }) => Promise<PushRegistrationSyncResult>;
+  readonly deactivateOnSignOut: (params: {
+    readonly deactivateToken: (expoPushToken: string) => Promise<number>;
+    readonly expectedUserId?: string | null;
+    readonly timeoutMs?: number;
+  }) => Promise<number>;
+}
+
+/**
+ * Coordinates async push token registration with monotonic generation cancellation so stale
+ * async registrations from a signed-out or previous user can never overwrite newer session state.
+ */
+export function createPushLifecycleCoordinator(): PushLifecycleCoordinator {
+  let generation = 0;
+  let activeToken: string | null = null;
+  let activeUserId: string | null = null;
+
+  const invalidate = (): number => {
+    generation += 1;
+    activeToken = null;
+    activeUserId = null;
+    return generation;
+  };
+
+  return {
+    getState: () => ({
+      generation,
+      activeToken,
+      activeUserId,
+    }),
+
+    invalidate,
+
+    async syncRegistration(params): Promise<PushRegistrationSyncResult> {
+      const expectedGen = invalidate();
+      const isStale = (): boolean =>
+        generation !== expectedGen ||
+        (params.isCurrentSession !== undefined && !params.isCurrentSession());
+
+      if (
+        !isInboxAndSupportAllowedStatus(params.accountStatus) ||
+        !params.driver.isPhysicalDevice
+      ) {
+        return {
+          pushStatus: 'unavailable_or_denied',
+          activeToken: null,
+        };
+      }
+
+      try {
+        const token = await params.driver.requestPermissionsAndGetToken();
+        if (isStale()) {
+          return {
+            pushStatus: 'idle',
+            activeToken: null,
+          };
+        }
+        if (!token) {
+          return {
+            pushStatus: 'unavailable_or_denied',
+            activeToken: null,
+          };
+        }
+
+        const result = await params.registerToken({
+          expo_push_token: token,
+          platform: params.driver.platform,
+          device_id: params.driver.deviceId,
+          app_version: params.driver.appVersion,
+          locale: params.driver.locale,
+        });
+
+        if (isStale()) {
+          return {
+            pushStatus: 'idle',
+            activeToken: null,
+          };
+        }
+
+        if (result.status === 'degraded_conflict') {
+          activeToken = null;
+          activeUserId = null;
+          return {
+            pushStatus: 'token_conflict_degraded',
+            activeToken: null,
+          };
+        }
+
+        activeToken = result.token.expo_push_token;
+        activeUserId = params.userId;
+        return {
+          pushStatus: 'active',
+          activeToken: result.token.expo_push_token,
+        };
+      } catch (err) {
+        if (isStale()) {
+          return {
+            pushStatus: 'idle',
+            activeToken: null,
+          };
+        }
+        void err;
+        activeToken = null;
+        activeUserId = null;
+        return {
+          pushStatus: 'degraded_error',
+          activeToken: null,
+        };
+      }
+    },
+
+    async deactivateOnSignOut(params): Promise<number> {
+      const tokenToDeactivate = activeToken;
+      const ownerUserId = activeUserId;
+      // Clear memory and bump generation synchronously so any in-flight registration aborts cleanly.
+      invalidate();
+
+      if (!tokenToDeactivate) {
+        return 0;
+      }
+      if (params.expectedUserId && ownerUserId && params.expectedUserId !== ownerUserId) {
+        return 0;
+      }
+
+      let count = 0;
+      await runBoundedPushDeactivation(async () => {
+        count = await params.deactivateToken(tokenToDeactivate);
+      }, params.timeoutMs ?? 500);
+      return count;
+    },
+  };
+}
+
 export async function syncDevicePushRegistration(params: {
   readonly userId: string;
   readonly accountStatus: MobileAuthStatus;
@@ -297,48 +447,9 @@ export async function syncDevicePushRegistration(params: {
   readonly registerToken: (
     input: RegisterDeviceTokenCommand,
   ) => Promise<DeviceTokenRegistrationResult>;
+  readonly isCurrentSession?: () => boolean;
 }): Promise<PushRegistrationSyncResult> {
-  if (!isInboxAndSupportAllowedStatus(params.accountStatus) || !params.driver.isPhysicalDevice) {
-    return {
-      pushStatus: 'unavailable_or_denied',
-      activeToken: null,
-    };
-  }
-
-  try {
-    const token = await params.driver.requestPermissionsAndGetToken();
-    if (!token) {
-      return {
-        pushStatus: 'unavailable_or_denied',
-        activeToken: null,
-      };
-    }
-
-    const result = await params.registerToken({
-      expo_push_token: token,
-      platform: params.driver.platform,
-      device_id: params.driver.deviceId,
-      app_version: params.driver.appVersion,
-      locale: params.driver.locale,
-    });
-
-    if (result.status === 'degraded_conflict') {
-      return {
-        pushStatus: 'token_conflict_degraded',
-        activeToken: null,
-      };
-    }
-
-    return {
-      pushStatus: 'active',
-      activeToken: result.token.expo_push_token,
-    };
-  } catch {
-    return {
-      pushStatus: 'degraded_error',
-      activeToken: null,
-    };
-  }
+  return createPushLifecycleCoordinator().syncRegistration(params);
 }
 
 export async function runBoundedPushDeactivation(

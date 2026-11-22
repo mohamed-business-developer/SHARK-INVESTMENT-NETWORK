@@ -12,6 +12,7 @@ import {
   applyNotificationReadUpdate,
   applyNotificationSoftDelete,
   applyRealtimeNotificationInsert,
+  createPushLifecycleCoordinator,
   isInboxAndSupportAllowedStatus,
   normalizeRealtimeNotificationPayload,
   runBoundedPushDeactivation,
@@ -21,6 +22,8 @@ import {
   type DeviceTokenRegistrationResult,
   type MobileNotificationItem,
   type NotificationPagesSnapshot,
+  type PushLifecycleCoordinator,
+  type PushLifecycleState,
   type PushNotificationDriver,
   type PushRegistrationStatus,
   type PushRegistrationSyncResult,
@@ -34,6 +37,7 @@ export {
   applyNotificationReadUpdate,
   applyNotificationSoftDelete,
   applyRealtimeNotificationInsert,
+  createPushLifecycleCoordinator,
   isInboxAndSupportAllowedStatus,
   normalizeRealtimeNotificationPayload,
   runBoundedPushDeactivation,
@@ -43,6 +47,8 @@ export {
   type DeviceTokenRegistrationResult,
   type MobileNotificationItem,
   type NotificationPagesSnapshot,
+  type PushLifecycleCoordinator,
+  type PushLifecycleState,
   type PushNotificationDriver,
   type PushRegistrationStatus,
   type PushRegistrationSyncResult,
@@ -51,15 +57,15 @@ export {
   type RegisterDeviceTokenCommand,
 };
 
-let activeRegisteredPushToken: string | null = null;
+const defaultPushCoordinator = createPushLifecycleCoordinator();
 let foregroundHandlerConfigured = false;
 
 export function getActiveRegisteredPushToken(): string | null {
-  return activeRegisteredPushToken;
+  return defaultPushCoordinator.getState().activeToken;
 }
 
-export function setActiveRegisteredPushToken(token: string | null): void {
-  activeRegisteredPushToken = token;
+export function invalidatePushLifecycle(): number {
+  return defaultPushCoordinator.invalidate();
 }
 
 export function configureForegroundNotificationHandler(): void {
@@ -145,30 +151,33 @@ export async function syncNativeDevicePushRegistration(params: {
   readonly userId: string;
   readonly accountStatus: MobileAuthStatus;
   readonly locale: AppLocale;
+  readonly isCurrentSession?: () => boolean;
 }): Promise<PushRegistrationSyncResult> {
   const repo = createNotificationRepository(params.client);
-  const result = await syncDevicePushRegistration({
+  return defaultPushCoordinator.syncRegistration({
     userId: params.userId,
     accountStatus: params.accountStatus,
     driver: createNativePushNotificationDriver(params.locale),
     registerToken: (input) => repo.registerDeviceToken(input),
+    isCurrentSession: params.isCurrentSession,
   });
-  activeRegisteredPushToken = result.activeToken;
-  return result;
 }
 
 /**
- * Best-effort deactivation of the current account's device push tokens before sign-out clears the JWT.
- * Bounded strictly so offline/revoked sign-outs never hang or fail.
+ * Best-effort deactivation of ONLY the current device's registered push token before sign-out.
+ * Synchronously invalidates push lifecycle state so any in-flight registration cannot restore stale tokens.
  */
 export async function bestEffortDeactivatePushTokensOnSignOut(
   client: SupabaseClient,
+  expectedUserId?: string | null,
   timeoutMs = 500,
 ): Promise<void> {
-  const tokenToDeactivate = activeRegisteredPushToken;
-  activeRegisteredPushToken = null;
   const repo = createNotificationRepository(client);
-  await runBoundedPushDeactivation(() => repo.deactivateDeviceToken(tokenToDeactivate), timeoutMs);
+  await defaultPushCoordinator.deactivateOnSignOut({
+    deactivateToken: (expoPushToken) => repo.deactivateDeviceToken(expoPushToken),
+    expectedUserId,
+    timeoutMs,
+  });
 }
 
 export function extractSafeDeepLinkFromNotificationResponse(

@@ -94,14 +94,13 @@ function normalizeNotificationRow(row: MobileNotificationItem): MobileNotificati
   };
 }
 
-function extractRawErrorCode(err: unknown): { code?: string; status?: number } {
+function extractRawErrorCode(err: unknown): { code?: string } {
   if (typeof err !== 'object' || err === null) {
     return {};
   }
   const rec = err as Record<string, unknown>;
   return {
     code: typeof rec.code === 'string' ? rec.code : undefined,
-    status: typeof rec.status === 'number' ? rec.status : undefined,
   };
 }
 
@@ -287,35 +286,14 @@ export function createNotificationRepository(client: SupabaseClient): MobileNoti
               .single();
 
         if (writeResult.error) {
-          const { code, status } = extractRawErrorCode(writeResult.error);
-          if (code === '23505' || status === 409) {
-            // Non-fatal degraded push state when unique token belongs to another user; zero owner leakage.
+          const { code } = extractRawErrorCode(writeResult.error);
+          if (code === '23505') {
+            // Verified SQLSTATE 23505 unique_violation on expo_push_token; non-fatal degraded conflict without owner disclosure.
             return {
               status: 'degraded_conflict',
               reasonCode: 'PUSH_TOKEN_OWNERSHIP_CONFLICT',
               token: null,
             };
-          }
-
-          if (code === '42501') {
-            // Distinguish active account suspension from RLS cross-owner push token conflict.
-            const profileCheck = await client
-              .from('profiles')
-              .select('id, account_status')
-              .eq('id', user.id)
-              .maybeSingle<{ readonly id: string; readonly account_status: string }>();
-
-            if (
-              !profileCheck.error &&
-              profileCheck.data &&
-              profileCheck.data.account_status !== 'suspended'
-            ) {
-              return {
-                status: 'degraded_conflict',
-                reasonCode: 'PUSH_TOKEN_OWNERSHIP_CONFLICT',
-                token: null,
-              };
-            }
           }
         }
 
@@ -330,27 +308,30 @@ export function createNotificationRepository(client: SupabaseClient): MobileNoti
     },
 
     async deactivateDeviceToken(expoPushToken?: string | null): Promise<number> {
+      const safeToken =
+        typeof expoPushToken === 'string' ? expoPushTokenSchema.safeParse(expoPushToken) : null;
+      if (!safeToken || !safeToken.success) {
+        // Explicit validated current-device token is required; never deactivate other devices when absent.
+        return 0;
+      }
+
       return executeServiceCall(async () => {
         const { data: userData, error: authError } = await client.auth.getUser();
         if (authError || !userData.user) {
           return 0;
         }
 
-        const safeToken = expoPushToken ? expoPushTokenSchema.safeParse(expoPushToken) : null;
-        let query = client
+        const result = await client
           .from('device_tokens')
           .update({
             is_active: false,
             last_seen_at: new Date().toISOString(),
           })
           .eq('user_id', userData.user.id)
-          .eq('is_active', true);
+          .eq('expo_push_token', safeToken.data)
+          .eq('is_active', true)
+          .select('id');
 
-        if (safeToken && safeToken.success) {
-          query = query.eq('expo_push_token', safeToken.data);
-        }
-
-        const result = await query.select('id');
         const rows = (await assertSupabaseResult(result)) ?? [];
         return (rows as unknown[]).length;
       });
