@@ -338,5 +338,214 @@ describe('T5-14 Signed URL Service & Auto-Refresh Lifecycle (P5-I05 / P5-S03 pre
     expect(hookSource).toContain("status !== 'suspended'");
     expect(hookSource).toContain('controller.dispose()');
     expect(hookSource).toContain('SIGNED_URL_MEMORY_ONLY_POLICY');
+
+    // Static verification that neither controller nor hook touches persistent or query caches
+    const serviceSource = readFileSync(
+      resolve(import.meta.dirname, '../../apps/mobile/src/services/signed-urls.ts'),
+      'utf8',
+    );
+    const forbiddenStorageApis = [
+      'AsyncStorage',
+      'SecureStore',
+      'localStorage',
+      'sessionStorage',
+      'FileSystem',
+      'documentDirectory',
+      'cacheDirectory',
+      'writeAsStringAsync',
+      'useQuery',
+      'QueryClient',
+    ];
+    for (const api of forbiddenStorageApis) {
+      expect(serviceSource).not.toContain(api);
+      expect(hookSource).not.toContain(api);
+    }
+  });
+
+  it('prevents stale async responses from restoring URLs after clear, target switch, or unmount dispose', async () => {
+    vi.useFakeTimers();
+
+    type DeferredResponse = {
+      resolve: (value: GetSignedDocumentUrlResponse) => void;
+      reject: (error: unknown) => void;
+    };
+    const pending: DeferredResponse[] = [];
+
+    const fetchSignedUrl = vi.fn(() => {
+      return new Promise<GetSignedDocumentUrlResponse>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      });
+    });
+
+    const controller = createSignedUrlController({ fetchSignedUrl });
+
+    // 1. In-flight response arriving after clear (enabled: false) must be ignored
+    controller.setTarget({
+      bucket: 'pitch-documents',
+      documentId: DOC_ID,
+      enabled: true,
+    });
+    expect(pending).toHaveLength(1);
+
+    controller.setTarget({
+      bucket: 'pitch-documents',
+      documentId: DOC_ID,
+      enabled: false,
+    });
+    expect(controller.getState().status).toBe('idle');
+    expect(controller.getState().data).toBeNull();
+
+    pending[0]?.resolve({
+      signedUrl:
+        'https://demo.supabase.co/storage/v1/object/sign/pitch-documents/x.pdf?token=stale1',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      ttlSeconds: 60,
+      contentType: 'application/pdf',
+      fileName: 'x.pdf',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getState().data).toBeNull();
+    expect(controller.getState().status).toBe('idle');
+
+    // 2. Switching to another document drops late fulfillment & late rejection from previous request
+    controller.setTarget({
+      bucket: 'pitch-documents',
+      documentId: DOC_ID,
+      enabled: true,
+    });
+    controller.setTarget({
+      bucket: 'verification-documents',
+      documentId: VERIF_ID,
+      storagePath: `${USER_ID}/${VERIF_ID}/id.pdf`,
+      enabled: true,
+    });
+    expect(pending).toHaveLength(3);
+
+    pending[1]?.reject(
+      new AppDomainError({
+        code: 'FORBIDDEN',
+        messageKey: 'errors.forbidden',
+        statusCode: 403,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getState().isLocked).toBe(false);
+    expect(controller.getState().data).toBeNull();
+
+    pending[2]?.resolve({
+      signedUrl:
+        'https://demo.supabase.co/storage/v1/object/sign/verification-documents/id.pdf?token=current',
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      ttlSeconds: 120,
+      contentType: 'application/pdf',
+      fileName: 'id.pdf',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getState().status).toBe('ready');
+    expect(controller.getState().data?.signedUrl).toContain('token=current');
+
+    // 3. Dispose while a manual refresh is in-flight prevents late restoration
+    void controller.refreshNow();
+    expect(pending).toHaveLength(4);
+    controller.dispose();
+    pending[3]?.resolve({
+      signedUrl:
+        'https://demo.supabase.co/storage/v1/object/sign/verification-documents/id.pdf?token=afterDispose',
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+      ttlSeconds: 120,
+      contentType: 'application/pdf',
+      fileName: 'id.pdf',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getState().data).toBeNull();
+    expect(controller.getState().status).toBe('idle');
+  });
+
+  it('locks and purges memory on 401 logout, 403 account suspension, 403 revocation, and 404 not found', async () => {
+    vi.useFakeTimers();
+
+    const denialCases = [
+      { statusCode: 401, code: 'UNAUTHORIZED', messageKey: 'errors.unauthorized' },
+      { statusCode: 403, code: 'ACCOUNT_SUSPENDED', messageKey: 'errors.accountSuspended' },
+      { statusCode: 403, code: 'FORBIDDEN', messageKey: 'errors.forbidden' },
+      { statusCode: 404, code: 'DOCUMENT_NOT_FOUND', messageKey: 'errors.notFound' },
+    ] as const;
+
+    for (const denial of denialCases) {
+      let attempt = 0;
+      const fetchSignedUrl = vi.fn(async (): Promise<GetSignedDocumentUrlResponse> => {
+        attempt += 1;
+        if (attempt === 1) {
+          return {
+            signedUrl: `https://demo.supabase.co/storage/v1/object/sign/pitch-documents/deck.pdf?token=v${attempt}`,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            ttlSeconds: 60,
+            contentType: 'application/pdf',
+            fileName: 'deck.pdf',
+          };
+        }
+        throw new AppDomainError(denial);
+      });
+
+      const controller = createSignedUrlController({ fetchSignedUrl });
+      controller.setTarget({ bucket: 'pitch-documents', documentId: DOC_ID, enabled: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(controller.getState().status).toBe('ready');
+
+      await controller.refreshNow();
+      expect(controller.getState().status).toBe('locked');
+      expect(controller.getState().isLocked).toBe(true);
+      expect(controller.getState().data).toBeNull();
+      expect(controller.getState().error?.code).toBe(denial.code);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fetchSignedUrl).toHaveBeenCalledTimes(2);
+      controller.dispose();
+    }
+  });
+
+  it('resumes foreground gracefully when cached in-memory URL still has >10s TTL vs <=10s TTL', async () => {
+    vi.useFakeTimers();
+
+    let count = 0;
+    const fetchSignedUrl = vi.fn(async (): Promise<GetSignedDocumentUrlResponse> => {
+      count += 1;
+      return {
+        signedUrl: `https://demo.supabase.co/storage/v1/object/sign/pitch-documents/deck.pdf?token=v${count}`,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        ttlSeconds: 60,
+        contentType: 'application/pdf',
+        fileName: 'deck.pdf',
+      };
+    });
+
+    const controller = createSignedUrlController({ fetchSignedUrl });
+    controller.setTarget({ bucket: 'pitch-documents', documentId: DOC_ID, enabled: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSignedUrl).toHaveBeenCalledTimes(1);
+
+    // Background for 20s (40s remaining TTL, still well above 10s refresh buffer)
+    controller.setActive(false);
+    await vi.advanceTimersByTimeAsync(20_000);
+    controller.setActive(true);
+    await vi.advanceTimersByTimeAsync(0);
+    // Keeps valid v1 in RAM without eager re-fetch, then refreshes proactively at 50s mark (+30s)
+    expect(fetchSignedUrl).toHaveBeenCalledTimes(1);
+    expect(controller.getState().data?.signedUrl).toContain('token=v1');
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchSignedUrl).toHaveBeenCalledTimes(2);
+    expect(controller.getState().data?.signedUrl).toContain('token=v2');
+
+    // Background past refresh window (52s elapsed => 8s remaining <= 10s threshold) triggers immediate refresh on resume
+    controller.setActive(false);
+    await vi.advanceTimersByTimeAsync(52_000);
+    expect(fetchSignedUrl).toHaveBeenCalledTimes(2);
+    controller.setActive(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSignedUrl).toHaveBeenCalledTimes(3);
+    expect(controller.getState().data?.signedUrl).toContain('token=v3');
+
+    controller.dispose();
   });
 });
