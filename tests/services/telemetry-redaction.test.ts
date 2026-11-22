@@ -291,5 +291,175 @@ describe('T5-16 Sentry PII Redaction & Opt-In PostHog EU Telemetry (P5-U05)', ()
     expect(useAuthSource).toContain('mobileAnalytics.syncConsent');
     expect(useAuthSource).toContain('mobileAnalytics.reset()');
     expect(useAuthSource).toContain('setSentryUserId');
+    expect(useAuthSource).toContain('authState.profile?.analytics_opt_in === true');
+  });
+
+  it('scrubs international spaced/hyphenated and common local phone formats without corrupting UUIDs, decimals, or ISO dates', () => {
+    const safeUuid1 = '11111111-1111-4111-8111-111111111104';
+    const safeUuid2 = '05012345-1234-4111-8111-111111111104';
+    const safeIsoDate = '2026-11-22T15:30:00Z';
+    const safeDecimal = '0.123456789';
+
+    const phoneSamples = [
+      '+966501234567',
+      '+966 50 123 4567',
+      '+971-50-123-4567',
+      '+1 (415) 555-2671',
+      '(+966) 50 123 4567',
+      '00966501234567',
+      '00966 50 123 4567',
+      '0501234567',
+      '050 123 4567',
+      '050-123-4567',
+      '(050) 123 4567',
+      '01012345678',
+      '010 1234 5678',
+      '011-234-5678',
+    ];
+
+    for (const phone of phoneSamples) {
+      const scrubbed = scrubSensitiveText(`Contact ${phone} regarding ref ${safeUuid2}`);
+      expect(scrubbed).not.toContain(phone);
+      expect(scrubbed).toContain('[REDACTED_PHONE]');
+      expect(scrubbed).toContain(safeUuid2);
+    }
+
+    const safePayload = scrubSensitiveText(
+      `ids=${safeUuid1},${safeUuid2} ts=${safeIsoDate} ratio=${safeDecimal} code=042`,
+    );
+    expect(safePayload).toContain(safeUuid1);
+    expect(safePayload).toContain(safeUuid2);
+    expect(safePayload).toContain(safeIsoDate);
+    expect(safePayload).toContain(safeDecimal);
+    expect(safePayload).toContain('code=042');
+    expect(safePayload).not.toContain('[REDACTED_PHONE]');
+  });
+
+  it('guarantees non-blocking bounded teardown on hanging or failing drivers, resets identity across account switching, and dispatches zero events without opt-in', async () => {
+    vi.useFakeTimers();
+    try {
+      const USER_A = '11111111-1111-4111-8111-111111111104';
+      const USER_B = '11111111-1111-4111-8111-111111111105';
+
+      // 1. No analytics events ever dispatched when analytics_opt_in !== true
+      const callLog: string[] = [];
+      const trackingDriver: AnalyticsDriver = {
+        identify: (id) => callLog.push(`identify:${id}`),
+        capture: (name) => callLog.push(`capture:${name}`),
+        screen: (name) => callLog.push(`screen:${name}`),
+        optIn: async () => {
+          callLog.push('optIn');
+        },
+        optOut: async () => {
+          callLog.push('optOut');
+        },
+        reset: () => callLog.push('reset'),
+        shutdown: async () => {
+          callLog.push('shutdown');
+        },
+      };
+
+      const optedOutService = createAnalyticsService({
+        apiKey: 'phc_live_eu_key_999',
+        host: 'https://eu.i.posthog.com',
+        createDriver: () => trackingDriver,
+      });
+
+      await optedOutService.syncConsent({ enabled: false, userId: USER_A });
+      optedOutService.trackEvent('pitch_viewed', { pitch_id: 'p1' });
+      optedOutService.trackScreen('/pitches');
+      expect(optedOutService.isEnabled()).toBe(false);
+      expect(callLog).toEqual([]);
+
+      // 2. Account switching (User A -> User B -> signed out / opt-out) resets identity before re-identifying
+      await optedOutService.syncConsent({ enabled: true, userId: USER_A });
+      await optedOutService.syncConsent({ enabled: true, userId: USER_B });
+      await optedOutService.syncConsent({ enabled: false, userId: null });
+      optedOutService.trackEvent('should_not_send', {});
+
+      expect(callLog).toEqual([
+        'optIn',
+        `identify:${USER_A}`,
+        'optIn',
+        'reset',
+        `identify:${USER_B}`,
+        'reset',
+        'optOut',
+        'shutdown',
+      ]);
+      expect(optedOutService.isEnabled()).toBe(false);
+
+      // 3. Hanging custom driver teardown cannot block sign-out indefinitely
+      const hangDriverReset = vi.fn();
+      const hangingDriver: AnalyticsDriver = {
+        identify: vi.fn(),
+        capture: vi.fn(),
+        screen: vi.fn(),
+        optIn: async () => undefined,
+        optOut: () => new Promise<void>(() => {}),
+        reset: hangDriverReset,
+        shutdown: () => new Promise<void>(() => {}),
+      };
+
+      const hangingService = createAnalyticsService({
+        apiKey: 'phc_live_eu_key_999',
+        host: 'https://eu.i.posthog.com',
+        teardownTimeoutMs: 50,
+        createDriver: () => hangingDriver,
+      });
+
+      await hangingService.syncConsent({ enabled: true, userId: USER_A });
+      expect(hangingService.isEnabled()).toBe(true);
+
+      let resetSettled = false;
+      const resetPromise = hangingService.reset().then(() => {
+        resetSettled = true;
+      });
+      // Immediately disabled synchronously before timers even finish
+      expect(hangingService.isEnabled()).toBe(false);
+      expect(hangDriverReset).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(110);
+      await resetPromise;
+      expect(resetSettled).toBe(true);
+
+      // 4. Failing custom driver & withdrawal during pending optIn() cannot throw or re-identify user
+      const identifySpy = vi.fn();
+      let resolveOptIn!: () => void;
+      const throwingDriver: AnalyticsDriver = {
+        identify: identifySpy,
+        capture: vi.fn(),
+        screen: vi.fn(),
+        optIn: () =>
+          new Promise<void>((resolve) => {
+            resolveOptIn = resolve;
+          }),
+        optOut: async () => {
+          throw new Error('network error');
+        },
+        reset: () => {
+          throw new Error('reset exploded');
+        },
+        shutdown: async () => {
+          throw new Error('shutdown exploded');
+        },
+      };
+
+      const raceService = createAnalyticsService({
+        apiKey: 'phc_live_eu_key_999',
+        host: 'https://eu.i.posthog.com',
+        teardownTimeoutMs: 50,
+        createDriver: () => throwingDriver,
+      });
+
+      const pendingSync = raceService.syncConsent({ enabled: true, userId: USER_A });
+      const resetPromiseRace = raceService.reset();
+      resolveOptIn();
+      await Promise.all([pendingSync, resetPromiseRace]);
+      expect(identifySpy).not.toHaveBeenCalled();
+      expect(raceService.isEnabled()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

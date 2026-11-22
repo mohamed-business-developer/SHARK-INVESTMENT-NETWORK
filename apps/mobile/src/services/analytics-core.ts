@@ -36,6 +36,7 @@ export interface AnalyticsClient {
 export interface CreateAnalyticsServiceOptions {
   readonly apiKey?: string;
   readonly host?: string;
+  readonly teardownTimeoutMs?: number;
   readonly createDriver?: (config: {
     readonly apiKey: string;
     readonly host: string;
@@ -112,39 +113,69 @@ export function buildPostHogEuOptions(host: string) {
  * Never instantiates PostHog or dispatches events before explicit `analytics_opt_in === true`,
  * and stops immediately when consent is withdrawn or the user signs out.
  */
+async function withBoundedTimeout(
+  operation: () => void | Promise<void> | undefined,
+  timeoutMs: number,
+): Promise<void> {
+  let result: void | Promise<void> | undefined;
+  try {
+    result = operation();
+  } catch {
+    return;
+  }
+
+  if (!result || typeof result.then !== 'function') {
+    return;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      result.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export function createAnalyticsService(options?: CreateAnalyticsServiceOptions): AnalyticsClient {
   const rawKey = options?.apiKey?.trim();
   const apiKey = rawKey && !isPlaceholderEnvValue(rawKey) ? rawKey : undefined;
   const euHost = resolvePostHogEuHost(options?.host);
   const isConfigured = Boolean(apiKey && euHost);
   const buildDriver = options?.createDriver;
+  const teardownTimeoutMs = Math.max(10, Math.min(options?.teardownTimeoutMs ?? 250, 5000));
 
   let consented = false;
+  let consentGeneration = 0;
   let identifiedUserId: string | null = null;
   let driver: AnalyticsDriver | null = null;
 
   const teardownDriver = async (): Promise<void> => {
+    consentGeneration += 1;
+    consented = false;
     const active = driver;
     driver = null;
     identifiedUserId = null;
     if (!active) {
       return;
     }
-    try {
-      await active.optOut();
-    } catch {
-      // Never block sign-out or consent withdrawal on analytics teardown errors.
-    }
+
     try {
       active.reset();
     } catch {
-      // Ignore reset errors on teardown.
+      // Ignore reset errors on teardown so sign-out never fails or stalls.
     }
-    try {
-      await active.shutdown?.();
-    } catch {
-      // Ignore shutdown errors on teardown.
-    }
+
+    const startedAt = Date.now();
+    await withBoundedTimeout(() => active.optOut(), teardownTimeoutMs);
+    const remainingMs = Math.max(10, teardownTimeoutMs - (Date.now() - startedAt));
+    await withBoundedTimeout(() => active.shutdown?.(), remainingMs);
   };
 
   return {
@@ -154,20 +185,35 @@ export function createAnalyticsService(options?: CreateAnalyticsServiceOptions):
 
     async syncConsent(state: AnalyticsConsentState): Promise<void> {
       if (!state.enabled || !isConfigured || !apiKey || !euHost || !buildDriver) {
-        consented = false;
         await teardownDriver();
         return;
       }
 
+      const generation = ++consentGeneration;
       consented = true;
       if (!driver) {
         driver = buildDriver({ apiKey, host: euHost });
       }
       await driver.optIn();
 
+      if (generation !== consentGeneration || !consented || !driver) {
+        return;
+      }
+
       const validUserId =
         state.userId && uuidSchema.safeParse(state.userId).success ? state.userId : null;
-      if (validUserId && validUserId !== identifiedUserId) {
+      if (!validUserId) {
+        if (identifiedUserId !== null) {
+          driver.reset();
+          identifiedUserId = null;
+        }
+        return;
+      }
+
+      if (validUserId !== identifiedUserId) {
+        if (identifiedUserId !== null) {
+          driver.reset();
+        }
         driver.identify(validUserId);
         identifiedUserId = validUserId;
       }
@@ -196,7 +242,6 @@ export function createAnalyticsService(options?: CreateAnalyticsServiceOptions):
     },
 
     async reset(): Promise<void> {
-      consented = false;
       await teardownDriver();
     },
   };

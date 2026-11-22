@@ -144,6 +144,32 @@ export function scrubUrlQuery(input: string): string {
 /**
  * Scrubs Bearer tokens, JWTs, signed URL query parameters, push tokens, emails, and phone numbers from free-form text.
  */
+const INTL_PHONE_PATTERN =
+  /(^|[\s:=(["',])((?:\(\+[1-9]\d{0,3}\)|\+[1-9])(?:[\s.-]*\(?\d{1,5}\)?){1,7})(?=$|[\s),.;"'\]&])/g;
+
+const LOCAL_OR_TRUNK_PHONE_PATTERN =
+  /(^|[\s:=(["',])((?:\(0\d{1,4}\)|0\d)(?:[\s-]?\d{1,5}){1,7})(?=$|[\s),.;"'\]&])/g;
+
+function redactMatchedPhone(
+  match: string,
+  prefix: string,
+  candidate: string,
+  isIntl: boolean,
+): string {
+  const digits = candidate.replace(/\D/g, '');
+  if (/^0{4,}/.test(digits) || /^\d{8}-\d{4}/.test(candidate)) {
+    return match;
+  }
+
+  const maxDigits = isIntl || digits.startsWith('00') ? 17 : 15;
+  const minDigits = isIntl ? 7 : 9;
+  if (digits.length < minDigits || digits.length > maxDigits) {
+    return match;
+  }
+
+  return `${prefix}${REDACTED_PHONE}`;
+}
+
 export function scrubSensitiveText(input: string): string {
   let scrubbed = scrubUrlQuery(input);
   scrubbed = scrubbed.replace(/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi, `Bearer ${REDACTED}`);
@@ -156,7 +182,14 @@ export function scrubSensitiveText(input: string): string {
     REDACTED_PUSH_TOKEN,
   );
   scrubbed = scrubbed.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, REDACTED_EMAIL);
-  scrubbed = scrubbed.replace(/(^|[\s:(])(\+[1-9]\d{6,14})(?=$|[\s),.;])/g, `$1${REDACTED_PHONE}`);
+  scrubbed = scrubbed.replace(INTL_PHONE_PATTERN, (match, prefix: string, candidate: string) =>
+    redactMatchedPhone(match, prefix, candidate, true),
+  );
+  scrubbed = scrubbed.replace(
+    LOCAL_OR_TRUNK_PHONE_PATTERN,
+    (match, prefix: string, candidate: string) =>
+      redactMatchedPhone(match, prefix, candidate, false),
+  );
   return scrubbed;
 }
 
