@@ -2,8 +2,11 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   PITCH_DOCUMENT_CATEGORIES,
   type CursorPageResponse,
+  type DocumentScanStatus,
   type InvestmentInterestRow,
   type InvestmentInterestStatus,
+  type InvestorPitchDocumentRow,
+  type InvestorPitchRow,
   type PitchAccessGrantRow,
   type PitchAccessMode,
   type PitchDocumentRow,
@@ -39,7 +42,51 @@ import {
   verifyCompanyOperator,
 } from './helpers';
 
-export const PITCH_SELECT_COLUMNS = [
+/**
+ * Investor-safe pitch projection strictly omitting moderation/operator-only metadata
+ * (`rejection_reason`, `approved_by`, `restricted_at`, `restricted_by`).
+ */
+export const PITCH_INVESTOR_SELECT_COLUMNS = [
+  'id',
+  'company_id',
+  'created_by',
+  'sector_id',
+  'title_ar',
+  'title_en',
+  'summary_ar',
+  'summary_en',
+  'problem_ar',
+  'problem_en',
+  'solution_ar',
+  'solution_en',
+  'market_opportunity_ar',
+  'market_opportunity_en',
+  'traction_metrics',
+  'use_of_funds_ar',
+  'use_of_funds_en',
+  'funding_stage',
+  'instrument',
+  'target_amount_usd',
+  'min_ticket_usd',
+  'pre_money_valuation_usd',
+  'equity_offered_pct',
+  'currency_code',
+  'closing_date',
+  'status',
+  'is_featured',
+  'submitted_at',
+  'approved_at',
+  'closed_at',
+  'created_at',
+  'updated_at',
+  'deleted_at',
+].join(', ');
+
+/**
+ * Operator/admin pitch projection including moderation metadata; may only be queried after
+ * server-verified company operator authorization.
+ */
+export const PITCH_OPERATOR_SELECT_COLUMNS = [
   'id',
   'company_id',
   'created_by',
@@ -79,7 +126,34 @@ export const PITCH_SELECT_COLUMNS = [
   'deleted_at',
 ].join(', ');
 
-export const PITCH_DOCUMENT_SELECT_COLUMNS = [
+/**
+ * Investor-safe pitch document metadata projection strictly omitting storage paths, uploader IDs,
+ * antivirus scan status, and internal moderation/restriction metadata.
+ */
+export const PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS = [
+  'id',
+  'pitch_id',
+  'company_id',
+  'category',
+  'title_ar',
+  'title_en',
+  'file_name',
+  'mime_type',
+  'file_size_bytes',
+  'checksum_sha256',
+  'is_restricted',
+  'is_active',
+  'sort_order',
+  'created_at',
+  'updated_at',
+  'deleted_at',
+].join(', ');
+
+/**
+ * Operator/admin document metadata projection including storage path and scanning/moderation metadata;
+ * may only be queried after server-verified company operator authorization.
+ */
+export const PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS = [
   'id',
   'pitch_id',
   'company_id',
@@ -198,8 +272,10 @@ export function isPitchAccessGrantActive(
  * Derives UI lock / clearance state purely from server-returned pitch, documents, and active grants.
  */
 export function derivePitchAccessState(params: {
-  readonly pitch: PitchRow | null;
-  readonly documents?: readonly PitchDocumentRow[];
+  readonly pitch: Pick<PitchRow, 'id' | 'status'> | null;
+  readonly documents?: readonly (Pick<PitchDocumentRow, 'id' | 'is_active' | 'is_restricted'> & {
+    readonly scan_status?: DocumentScanStatus;
+  })[];
   readonly myGrants?: readonly PitchAccessGrantRow[];
   readonly isOperator?: boolean;
   readonly nowMs?: number;
@@ -226,7 +302,7 @@ export function derivePitchAccessState(params: {
       unlockedDocumentIds.add(doc.id);
       continue;
     }
-    if (doc.scan_status === 'quarantined' || !doc.is_active) {
+    if (('scan_status' in doc && doc.scan_status === 'quarantined') || !doc.is_active) {
       continue;
     }
     const docSpecificGrant = activeGrants.some((grant) => grant.pitch_document_id === doc.id);
@@ -307,11 +383,59 @@ function buildSafePitchWriteFields(valid: z.output<typeof upsertPitchSchema>) {
   };
 }
 
+async function requireCompanyOperatorAccess(
+  client: SupabaseClient,
+  userId: string,
+  companyId: string,
+): Promise<void> {
+  const operatorAccess = await verifyCompanyOperator(client, userId, companyId);
+  if (!operatorAccess.isOperator) {
+    throw new AppDomainError({
+      code: 'FORBIDDEN',
+      messageKey: 'errors.forbidden',
+      statusCode: 403,
+    });
+  }
+}
+
+async function requireEntityCompanyOperator(
+  client: SupabaseClient,
+  userId: string,
+  table: 'pitches' | 'pitch_documents' | 'investment_interests',
+  entityId: string,
+): Promise<string> {
+  const entityRefResult = await client
+    .from(table)
+    .select('id, company_id')
+    .eq('id', entityId)
+    .is('deleted_at', null)
+    .maybeSingle<{ readonly id: string; readonly company_id: string }>();
+
+  const entityRef = await assertSupabaseResult(entityRefResult);
+  if (!entityRef) {
+    throw new AppDomainError({
+      code: 'FORBIDDEN',
+      messageKey: 'errors.forbidden',
+      statusCode: 403,
+    });
+  }
+
+  await requireCompanyOperatorAccess(client, userId, entityRef.company_id);
+  return entityRef.company_id;
+}
+
 export interface MobilePitchRepository {
   readonly listAccessiblePitches: (
     filters?: PitchDirectoryFilterInput,
-  ) => Promise<CursorPageResponse<PitchRow>>;
-  readonly getAccessiblePitchById: (pitchId: string) => Promise<PitchRow | null>;
+  ) => Promise<CursorPageResponse<InvestorPitchRow>>;
+  readonly getAccessiblePitchById: (pitchId: string) => Promise<InvestorPitchRow | null>;
+  readonly listCompanyAccessiblePitches: (
+    companyId: string,
+    options?: {
+      readonly cursor?: string | null;
+      readonly limit?: number;
+    },
+  ) => Promise<CursorPageResponse<InvestorPitchRow>>;
   readonly listCompanyPitches: (
     companyId: string,
     options?: {
@@ -320,11 +444,16 @@ export interface MobilePitchRepository {
       readonly limit?: number;
     },
   ) => Promise<CursorPageResponse<PitchRow>>;
+  readonly getOperatedPitchById: (pitchId: string) => Promise<PitchRow | null>;
   readonly createDraftPitch: (input: UpsertPitchInput) => Promise<PitchRow>;
   readonly updatePitch: (pitchId: string, input: UpsertPitchInput) => Promise<PitchRow>;
   readonly transitionPitch: (input: FounderPitchTransitionInput) => Promise<PitchRow>;
   readonly deleteDraftPitch: (pitchId: string) => Promise<void>;
   readonly listPitchDocuments: (
+    pitchId: string,
+    limit?: number,
+  ) => Promise<readonly InvestorPitchDocumentRow[]>;
+  readonly listOperatedPitchDocuments: (
     pitchId: string,
     limit?: number,
   ) => Promise<readonly PitchDocumentRow[]>;
@@ -373,7 +502,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
   return {
     async listAccessiblePitches(
       filters?: PitchDirectoryFilterInput,
-    ): Promise<CursorPageResponse<PitchRow>> {
+    ): Promise<CursorPageResponse<InvestorPitchRow>> {
       const valid = parseRepositoryInput(pitchDirectoryFilterSchema, filters ?? {});
       const decodedCursor = resolveCursorOrThrow(valid.cursor);
       const limit = clampPageLimit(valid.limit, 20);
@@ -381,7 +510,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       return executeServiceCall(async () => {
         let query = client
           .from('pitches')
-          .select(PITCH_SELECT_COLUMNS)
+          .select(PITCH_INVESTOR_SELECT_COLUMNS)
           .in('status', ['approved', 'restricted'])
           .is('deleted_at', null);
 
@@ -421,7 +550,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
           .limit(limit + 1);
 
         const rows = (await assertSupabaseResult(result)) ?? [];
-        return buildCursorPage(rows as unknown as PitchRow[], limit, (item) => ({
+        return buildCursorPage(rows as unknown as InvestorPitchRow[], limit, (item) => ({
           featured: item.is_featured,
           ts: item.approved_at ?? EPOCH_CURSOR_TS,
           id: item.id,
@@ -429,18 +558,57 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       });
     },
 
-    async getAccessiblePitchById(pitchId: string): Promise<PitchRow | null> {
+    async getAccessiblePitchById(pitchId: string): Promise<InvestorPitchRow | null> {
       const validId = parseRepositoryInput(uuidSchema, pitchId);
 
       return executeServiceCall(async () => {
         const result = await client
           .from('pitches')
-          .select(PITCH_SELECT_COLUMNS)
+          .select(PITCH_INVESTOR_SELECT_COLUMNS)
           .eq('id', validId)
           .is('deleted_at', null)
-          .maybeSingle<PitchRow>();
+          .maybeSingle<InvestorPitchRow>();
 
         return (await assertSupabaseResult(result)) ?? null;
+      });
+    },
+
+    async listCompanyAccessiblePitches(
+      companyId: string,
+      options?: {
+        readonly cursor?: string | null;
+        readonly limit?: number;
+      },
+    ): Promise<CursorPageResponse<InvestorPitchRow>> {
+      const validCompanyId = parseRepositoryInput(uuidSchema, companyId);
+      const pageParams = parseRepositoryInput(paginationQuerySchema, {
+        cursor: options?.cursor ?? null,
+        limit: options?.limit ?? 20,
+      });
+      const decodedCursor = resolveCursorOrThrow(pageParams.cursor);
+      const limit = clampPageLimit(pageParams.limit, 20);
+
+      return executeServiceCall(async () => {
+        await requireAuthenticatedUser(client);
+        let query = client
+          .from('pitches')
+          .select(PITCH_INVESTOR_SELECT_COLUMNS)
+          .eq('company_id', validCompanyId)
+          .in('status', ['approved', 'restricted'])
+          .is('deleted_at', null);
+
+        query = applyCreatedAtCursorFilter(query, decodedCursor);
+
+        const result = await query
+          .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
+          .limit(limit + 1);
+
+        const rows = (await assertSupabaseResult(result)) ?? [];
+        return buildCursorPage(rows as unknown as InvestorPitchRow[], limit, (item) => ({
+          ts: item.created_at,
+          id: item.id,
+        }));
       });
     },
 
@@ -461,10 +629,12 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       const limit = clampPageLimit(pageParams.limit, 20);
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        await requireCompanyOperatorAccess(client, user.id, validCompanyId);
+
         let query = client
           .from('pitches')
-          .select(PITCH_SELECT_COLUMNS)
+          .select(PITCH_OPERATOR_SELECT_COLUMNS)
           .eq('company_id', validCompanyId)
           .is('deleted_at', null);
 
@@ -487,11 +657,47 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       });
     },
 
+    async getOperatedPitchById(pitchId: string): Promise<PitchRow | null> {
+      const validId = parseRepositoryInput(uuidSchema, pitchId);
+
+      return executeServiceCall(async () => {
+        const user = await requireAuthenticatedUser(client);
+        const pitchRefResult = await client
+          .from('pitches')
+          .select('id, company_id')
+          .eq('id', validId)
+          .is('deleted_at', null)
+          .maybeSingle<{ readonly id: string; readonly company_id: string }>();
+
+        const pitchRef = await assertSupabaseResult(pitchRefResult);
+        if (!pitchRef) {
+          return null;
+        }
+
+        const access = await verifyCompanyOperator(client, user.id, pitchRef.company_id);
+        if (!access.isOperator) {
+          return null;
+        }
+
+        const result = await client
+          .from('pitches')
+          .select(PITCH_OPERATOR_SELECT_COLUMNS)
+          .eq('id', validId)
+          .eq('company_id', pitchRef.company_id)
+          .is('deleted_at', null)
+          .maybeSingle<PitchRow>();
+
+        return (await assertSupabaseResult(result)) ?? null;
+      });
+    },
+
     async createDraftPitch(input: UpsertPitchInput): Promise<PitchRow> {
       const valid = parseRepositoryInput(upsertPitchSchema, input);
 
       return executeServiceCall(async () => {
         const user = await requireAuthenticatedUser(client);
+        await requireCompanyOperatorAccess(client, user.id, valid.company_id);
+
         const result = await client
           .from('pitches')
           .insert({
@@ -501,7 +707,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
             is_featured: false,
             ...buildSafePitchWriteFields(valid),
           })
-          .select(PITCH_SELECT_COLUMNS)
+          .select(PITCH_OPERATOR_SELECT_COLUMNS)
           .single<PitchRow>();
 
         return requireEntityRow(await assertSupabaseResult(result));
@@ -513,14 +719,16 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       const valid = parseRepositoryInput(upsertPitchSchema, input);
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        await requireCompanyOperatorAccess(client, user.id, valid.company_id);
+
         const result = await client
           .from('pitches')
           .update(buildSafePitchWriteFields(valid))
           .eq('id', validId)
           .eq('company_id', valid.company_id)
           .is('deleted_at', null)
-          .select(PITCH_SELECT_COLUMNS)
+          .select(PITCH_OPERATOR_SELECT_COLUMNS)
           .maybeSingle<PitchRow>();
 
         return requireEntityRow(await assertSupabaseResult(result));
@@ -533,14 +741,22 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
         valid.next_status === 'pending' ? ['draft', 'rejected'] : ['approved', 'restricted'];
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        const companyId = await requireEntityCompanyOperator(
+          client,
+          user.id,
+          'pitches',
+          valid.pitch_id,
+        );
+
         const result = await client
           .from('pitches')
           .update({ status: valid.next_status })
           .eq('id', valid.pitch_id)
+          .eq('company_id', companyId)
           .in('status', [...allowedPriorStatuses])
           .is('deleted_at', null)
-          .select(PITCH_SELECT_COLUMNS)
+          .select(PITCH_OPERATOR_SELECT_COLUMNS)
           .maybeSingle<PitchRow>();
 
         return requireEntityRow(await assertSupabaseResult(result));
@@ -551,11 +767,14 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       const validId = parseRepositoryInput(uuidSchema, pitchId);
 
       await executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        const companyId = await requireEntityCompanyOperator(client, user.id, 'pitches', validId);
+
         const result = await client
           .from('pitches')
           .delete()
           .eq('id', validId)
+          .eq('company_id', companyId)
           .eq('status', 'draft')
           .select('id')
           .maybeSingle<{ readonly id: string }>();
@@ -564,15 +783,51 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       });
     },
 
-    async listPitchDocuments(pitchId: string, limit = 50): Promise<readonly PitchDocumentRow[]> {
+    async listPitchDocuments(
+      pitchId: string,
+      limit = 50,
+    ): Promise<readonly InvestorPitchDocumentRow[]> {
       const validPitchId = parseRepositoryInput(uuidSchema, pitchId);
       const safeLimit = clampPageLimit(limit, 50);
 
       return executeServiceCall(async () => {
         const result = await client
           .from('pitch_documents')
-          .select(PITCH_DOCUMENT_SELECT_COLUMNS)
+          .select(PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS)
           .eq('pitch_id', validPitchId)
+          .eq('is_active', true)
+          .neq('scan_status', 'quarantined')
+          .is('deleted_at', null)
+          .order('sort_order', { ascending: true })
+          .order('created_at', { ascending: true })
+          .limit(safeLimit);
+
+        const rows = await assertSupabaseResult(result);
+        return (rows ?? []) as unknown as InvestorPitchDocumentRow[];
+      });
+    },
+
+    async listOperatedPitchDocuments(
+      pitchId: string,
+      limit = 50,
+    ): Promise<readonly PitchDocumentRow[]> {
+      const validPitchId = parseRepositoryInput(uuidSchema, pitchId);
+      const safeLimit = clampPageLimit(limit, 50);
+
+      return executeServiceCall(async () => {
+        const user = await requireAuthenticatedUser(client);
+        const companyId = await requireEntityCompanyOperator(
+          client,
+          user.id,
+          'pitches',
+          validPitchId,
+        );
+
+        const result = await client
+          .from('pitch_documents')
+          .select(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS)
+          .eq('pitch_id', validPitchId)
+          .eq('company_id', companyId)
           .eq('is_active', true)
           .is('deleted_at', null)
           .order('sort_order', { ascending: true })
@@ -589,6 +844,25 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
 
       return executeServiceCall(async () => {
         const user = await requireAuthenticatedUser(client);
+        await requireCompanyOperatorAccess(client, user.id, valid.company_id);
+
+        const pitchRefResult = await client
+          .from('pitches')
+          .select('id, company_id')
+          .eq('id', valid.pitch_id)
+          .eq('company_id', valid.company_id)
+          .is('deleted_at', null)
+          .maybeSingle<{ readonly id: string; readonly company_id: string }>();
+
+        const pitchRef = await assertSupabaseResult(pitchRefResult);
+        if (!pitchRef) {
+          throw new AppDomainError({
+            code: 'FORBIDDEN',
+            messageKey: 'errors.forbidden',
+            statusCode: 403,
+          });
+        }
+
         const result = await client
           .from('pitch_documents')
           .insert({
@@ -609,7 +883,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
             is_active: true,
             sort_order: valid.sort_order,
           })
-          .select(PITCH_DOCUMENT_SELECT_COLUMNS)
+          .select(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS)
           .single<PitchDocumentRow>();
 
         return requireEntityRow(await assertSupabaseResult(result));
@@ -638,13 +912,21 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       }
 
       return executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        const companyId = await requireEntityCompanyOperator(
+          client,
+          user.id,
+          'pitch_documents',
+          validId,
+        );
+
         const result = await client
           .from('pitch_documents')
           .update(safePayload)
           .eq('id', validId)
+          .eq('company_id', companyId)
           .is('deleted_at', null)
-          .select(PITCH_DOCUMENT_SELECT_COLUMNS)
+          .select(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS)
           .maybeSingle<PitchDocumentRow>();
 
         return requireEntityRow(await assertSupabaseResult(result));
@@ -655,11 +937,19 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
       const validId = parseRepositoryInput(uuidSchema, documentId);
 
       await executeServiceCall(async () => {
-        await requireAuthenticatedUser(client);
+        const user = await requireAuthenticatedUser(client);
+        const companyId = await requireEntityCompanyOperator(
+          client,
+          user.id,
+          'pitch_documents',
+          validId,
+        );
+
         const result = await client
           .from('pitch_documents')
           .delete()
           .eq('id', validId)
+          .eq('company_id', companyId)
           .select('id')
           .maybeSingle<{ readonly id: string }>();
 
@@ -829,36 +1119,18 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
 
       return executeServiceCall(async () => {
         const user = await requireAuthenticatedUser(client);
-        const pitchRefResult = await client
-          .from('pitches')
-          .select('id, company_id')
-          .eq('id', validPitchId)
-          .is('deleted_at', null)
-          .maybeSingle<{ readonly id: string; readonly company_id: string }>();
-
-        const pitchRef = await assertSupabaseResult(pitchRefResult);
-        if (!pitchRef) {
-          throw new AppDomainError({
-            code: 'FORBIDDEN',
-            messageKey: 'errors.forbidden',
-            statusCode: 403,
-          });
-        }
-
-        const operatorAccess = await verifyCompanyOperator(client, user.id, pitchRef.company_id);
-        if (!operatorAccess.isOperator) {
-          throw new AppDomainError({
-            code: 'FORBIDDEN',
-            messageKey: 'errors.forbidden',
-            statusCode: 403,
-          });
-        }
+        const companyId = await requireEntityCompanyOperator(
+          client,
+          user.id,
+          'pitches',
+          validPitchId,
+        );
 
         let query = client
           .from('investment_interests')
           .select(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS)
           .eq('pitch_id', validPitchId)
-          .eq('company_id', pitchRef.company_id)
+          .eq('company_id', companyId)
           .is('deleted_at', null);
 
         query = applyCreatedAtCursorFilter(query, decodedCursor);
@@ -935,30 +1207,12 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
 
       return executeServiceCall(async () => {
         const user = await requireAuthenticatedUser(client);
-        const interestRefResult = await client
-          .from('investment_interests')
-          .select('id, company_id')
-          .eq('id', valid.interest_id)
-          .is('deleted_at', null)
-          .maybeSingle<{ readonly id: string; readonly company_id: string }>();
-
-        const interestRef = await assertSupabaseResult(interestRefResult);
-        if (!interestRef) {
-          throw new AppDomainError({
-            code: 'FORBIDDEN',
-            messageKey: 'errors.forbidden',
-            statusCode: 403,
-          });
-        }
-
-        const operatorAccess = await verifyCompanyOperator(client, user.id, interestRef.company_id);
-        if (!operatorAccess.isOperator) {
-          throw new AppDomainError({
-            code: 'FORBIDDEN',
-            messageKey: 'errors.forbidden',
-            statusCode: 403,
-          });
-        }
+        const companyId = await requireEntityCompanyOperator(
+          client,
+          user.id,
+          'investment_interests',
+          valid.interest_id,
+        );
 
         const result = await client
           .from('investment_interests')
@@ -968,7 +1222,7 @@ export function createPitchRepository(client: SupabaseClient): MobilePitchReposi
             reviewed_at: new Date().toISOString(),
           })
           .eq('id', valid.interest_id)
-          .eq('company_id', interestRef.company_id)
+          .eq('company_id', companyId)
           .is('deleted_at', null)
           .select(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS)
           .maybeSingle<InvestmentInterestRow>();

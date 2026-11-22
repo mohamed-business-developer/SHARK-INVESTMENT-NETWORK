@@ -6,6 +6,10 @@ import { PUBLIC_COMPANY_DIRECTORY_SELECT_COLUMNS } from '../../apps/mobile/src/r
 import {
   INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS,
   INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS,
+  PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS,
+  PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS,
+  PITCH_INVESTOR_SELECT_COLUMNS,
+  PITCH_OPERATOR_SELECT_COLUMNS,
   PITCH_REVIEW_SELECT_COLUMNS,
 } from '../../apps/mobile/src/repositories/pitch.repository';
 import { VERIFICATION_REQUEST_SELECT_COLUMNS } from '../../apps/mobile/src/repositories/verification.repository';
@@ -49,6 +53,38 @@ describe('P5-U04 Repository, Service & Hook Security Hygiene', () => {
     expect(PITCH_REVIEW_SELECT_COLUMNS).not.toContain('internal_notes');
     expect(INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS).not.toContain('founder_notes');
     expect(INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS).toContain('founder_notes');
+
+    for (const pitchModField of [
+      'rejection_reason',
+      'approved_by',
+      'restricted_at',
+      'restricted_by',
+    ]) {
+      expect(PITCH_INVESTOR_SELECT_COLUMNS).not.toContain(pitchModField);
+      expect(PITCH_OPERATOR_SELECT_COLUMNS).toContain(pitchModField);
+    }
+
+    for (const docInternalField of [
+      'storage_path',
+      'storage_bucket',
+      'restriction_reason',
+      'restricted_at',
+      'restricted_by',
+      'scan_status',
+      'uploaded_by',
+    ]) {
+      expect(PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS).not.toContain(docInternalField);
+    }
+
+    for (const docOperatorField of [
+      'storage_path',
+      'restriction_reason',
+      'restricted_by',
+      'scan_status',
+      'uploaded_by',
+    ]) {
+      expect(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS).toContain(docOperatorField);
+    }
 
     for (const privateField of [
       'registration_number',
@@ -94,31 +130,80 @@ describe('P5-U04 Repository, Service & Hook Security Hygiene', () => {
       /async\s+getOperatedCompanyById\([\s\S]*?verifyCompanyOperator\(/,
     );
 
-    // Non-owner / investor projections must remain strictly isolated from founder_notes
-    const founderProjectionUsages =
-      pitchRepoContent.match(/INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/g) ?? [];
-    expect(founderProjectionUsages).toHaveLength(3); // 1 declaration + 2 operator-gated usages
-    expect(pitchRepoContent).toMatch(
-      /async\s+listPitchInvestmentInterests\([\s\S]*?verifyCompanyOperator\([\s\S]*?INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/,
-    );
-    expect(pitchRepoContent).toMatch(
-      /async\s+respondToInvestmentInterest\([\s\S]*?verifyCompanyOperator\([\s\S]*?INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/,
-    );
+    const sliceMethodBody = (source: string, methodName: string): string => {
+      const startIndex = source.indexOf(`async ${methodName}(`);
+      expect(startIndex, `Missing method ${methodName}`).toBeGreaterThan(-1);
+      const nextMethodOffset = source.slice(startIndex + 1).search(/\n\s+async\s+/);
+      return nextMethodOffset === -1
+        ? source.slice(startIndex)
+        : source.slice(startIndex, startIndex + 1 + nextMethodOffset);
+    };
 
-    for (const methodName of [
+    const assertOperatorGatedUsage = (methodName: string, projectionConstant: string): void => {
+      const body = sliceMethodBody(pitchRepoContent, methodName);
+      const guardMatch = body.match(
+        /(verifyCompanyOperator|requireCompanyOperatorAccess|requireEntityCompanyOperator)\(/,
+      );
+      const selectIndex = body.indexOf(projectionConstant);
+      expect(guardMatch, `${methodName} missing operator guard`).not.toBeNull();
+      expect(selectIndex, `${methodName} missing ${projectionConstant}`).toBeGreaterThan(-1);
+      expect(guardMatch?.index ?? Infinity).toBeLessThan(selectIndex);
+    };
+
+    // Investor-facing methods must strictly use investor projections & never reference operator projections
+    for (const investorPitchMethod of [
+      'listAccessiblePitches',
+      'getAccessiblePitchById',
+      'listCompanyAccessiblePitches',
+    ]) {
+      const body = sliceMethodBody(pitchRepoContent, investorPitchMethod);
+      expect(body).toContain('PITCH_INVESTOR_SELECT_COLUMNS');
+      expect(body).not.toContain('PITCH_OPERATOR_SELECT_COLUMNS');
+    }
+
+    const investorDocBody = sliceMethodBody(pitchRepoContent, 'listPitchDocuments');
+    expect(investorDocBody).toContain('PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS');
+    expect(investorDocBody).not.toContain('PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS');
+
+    for (const investorInterestMethod of [
       'listOwnInvestmentInterests',
       'submitInvestmentInterest',
       'withdrawInvestmentInterest',
     ]) {
-      const startIndex = pitchRepoContent.indexOf(`async ${methodName}(`);
-      expect(startIndex).toBeGreaterThan(-1);
-      const nextMethodOffset = pitchRepoContent.slice(startIndex + 1).search(/\n\s+async\s+/);
-      const methodBody =
-        nextMethodOffset === -1
-          ? pitchRepoContent.slice(startIndex)
-          : pitchRepoContent.slice(startIndex, startIndex + 1 + nextMethodOffset);
-      expect(methodBody).not.toContain('INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS');
-      expect(methodBody).toContain('INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS');
+      const body = sliceMethodBody(pitchRepoContent, investorInterestMethod);
+      expect(body).toContain('INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS');
+      expect(body).not.toContain('INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS');
+    }
+
+    // Operator-only projections may appear ONLY in their export declaration + operator-gated methods
+    expect(pitchRepoContent.match(/PITCH_OPERATOR_SELECT_COLUMNS/g) ?? []).toHaveLength(6);
+    for (const opPitchMethod of [
+      'listCompanyPitches',
+      'getOperatedPitchById',
+      'createDraftPitch',
+      'updatePitch',
+      'transitionPitch',
+    ]) {
+      assertOperatorGatedUsage(opPitchMethod, 'PITCH_OPERATOR_SELECT_COLUMNS');
+    }
+
+    expect(pitchRepoContent.match(/PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS/g) ?? []).toHaveLength(4);
+    for (const opDocMethod of [
+      'listOperatedPitchDocuments',
+      'createPitchDocument',
+      'updatePitchDocumentMetadata',
+    ]) {
+      assertOperatorGatedUsage(opDocMethod, 'PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS');
+    }
+
+    expect(
+      pitchRepoContent.match(/INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS/g) ?? [],
+    ).toHaveLength(3);
+    for (const opInterestMethod of [
+      'listPitchInvestmentInterests',
+      'respondToInvestmentInterest',
+    ]) {
+      assertOperatorGatedUsage(opInterestMethod, 'INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS');
     }
   });
 

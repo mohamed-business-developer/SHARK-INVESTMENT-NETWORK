@@ -46,6 +46,14 @@ export interface PitchRow {
   readonly deleted_at: string | null;
 }
 
+/**
+ * Investor-safe pitch projection omitting moderation/operator-only metadata.
+ */
+export type InvestorPitchRow = Omit<
+  PitchRow,
+  'rejection_reason' | 'approved_by' | 'restricted_at' | 'restricted_by'
+>;
+
 export interface PitchReviewRow {
   readonly id: string;
   readonly pitch_id: string;

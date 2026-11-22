@@ -30,6 +30,21 @@ export interface PitchDocumentRow {
   readonly deleted_at: string | null;
 }
 
+/**
+ * Investor-safe pitch document metadata projection omitting storage path, uploader identity,
+ * antivirus scan state, and internal moderation/restriction fields.
+ */
+export type InvestorPitchDocumentRow = Omit<
+  PitchDocumentRow,
+  | 'uploaded_by'
+  | 'storage_bucket'
+  | 'storage_path'
+  | 'restriction_reason'
+  | 'restricted_at'
+  | 'restricted_by'
+  | 'scan_status'
+>;
+
 export interface GetSignedDocumentUrlRequest {
   readonly bucket: PrivateStorageBucketName;
   readonly documentId: string;

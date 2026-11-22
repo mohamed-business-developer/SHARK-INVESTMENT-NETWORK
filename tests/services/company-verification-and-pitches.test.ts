@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type {
+  InvestorPitchDocumentRow,
+  InvestorPitchRow,
   PitchAccessGrantRow,
   PitchDocumentRow,
   PitchRow,
@@ -23,9 +25,11 @@ import {
   INVESTMENT_INTEREST_FOUNDER_SELECT_COLUMNS,
   INVESTMENT_INTEREST_INVESTOR_SELECT_COLUMNS,
   PITCH_ACCESS_GRANT_SELECT_COLUMNS,
-  PITCH_DOCUMENT_SELECT_COLUMNS,
+  PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS,
+  PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS,
+  PITCH_INVESTOR_SELECT_COLUMNS,
+  PITCH_OPERATOR_SELECT_COLUMNS,
   PITCH_REVIEW_SELECT_COLUMNS,
-  PITCH_SELECT_COLUMNS,
 } from '../../apps/mobile/src/repositories/pitch.repository';
 import {
   applyOptimisticSavedItemPages,
@@ -478,11 +482,24 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
   it('enforces founder pitch lifecycle without self-approval (P5-I03), strict doc checksums, and non-internal reviews', async () => {
     const mock = createRecordingClient({
       authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
       sequentialResponses: [
+        // createDraftPitch: company ownership check + pitch insert
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
         { data: buildPitchRow({ status: 'draft', approved_at: null, approved_by: null }) },
+        // transitionPitch: pitch lookup + company ownership check + pitch update
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
         { data: buildPitchRow({ status: 'closed', closed_at: '2026-11-21T00:00:00.000Z' }) },
+        // deleteDraftPitch: pitch lookup + company ownership check + pitch delete
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
         { data: { id: PITCH_ID } },
+        // createPitchDocument: company ownership check + pitch ref check + doc insert
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
         { data: buildDocRow() },
+        // listNonInternalPitchReviews
         { data: [] },
       ],
     });
@@ -564,9 +581,9 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
       target_amount_usd: 1500000,
       min_ticket_usd: 50000,
     });
-    expect(mock.ops[0]?.table).toBe('pitches');
-    expect(mock.ops[0]?.selectColumns).toBe(PITCH_SELECT_COLUMNS);
-    expect(mock.ops[0]?.payload).toMatchObject({
+    expect(mock.ops[1]?.table).toBe('pitches');
+    expect(mock.ops[1]?.selectColumns).toBe(PITCH_OPERATOR_SELECT_COLUMNS);
+    expect(mock.ops[1]?.payload).toMatchObject({
       created_by: USER_ID,
       status: 'draft',
       is_featured: false,
@@ -574,16 +591,16 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
 
     // Closing an independently admin-approved pitch restricts prior status strictly to ['approved', 'restricted']
     await repo.transitionPitch({ pitch_id: PITCH_ID, next_status: 'closed' });
-    expect(mock.ops[1]?.payload).toEqual({ status: 'closed' });
-    expect(mock.ops[1]?.filters).toContainEqual({
+    expect(mock.ops[4]?.payload).toEqual({ status: 'closed' });
+    expect(mock.ops[4]?.filters).toContainEqual({
       op: 'in',
       args: ['status', ['approved', 'restricted']],
     });
 
     // deleteDraftPitch executes DELETE strictly where status = 'draft'
     await repo.deleteDraftPitch(PITCH_ID);
-    expect(mock.ops[2]?.action).toBe('delete');
-    expect(mock.ops[2]?.filters).toContainEqual({ op: 'eq', args: ['status', 'draft'] });
+    expect(mock.ops[7]?.action).toBe('delete');
+    expect(mock.ops[7]?.filters).toContainEqual({ op: 'eq', args: ['status', 'draft'] });
 
     // Valid canonical pitch document creation
     await repo.createPitchDocument({
@@ -596,9 +613,9 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
       file_size_bytes: 1024000,
       checksum_sha256: VALID_SHA256,
     });
-    expect(mock.ops[3]?.table).toBe('pitch_documents');
-    expect(mock.ops[3]?.selectColumns).toBe(PITCH_DOCUMENT_SELECT_COLUMNS);
-    expect(mock.ops[3]?.payload).toMatchObject({
+    expect(mock.ops[10]?.table).toBe('pitch_documents');
+    expect(mock.ops[10]?.selectColumns).toBe(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS);
+    expect(mock.ops[10]?.payload).toMatchObject({
       uploaded_by: USER_ID,
       storage_bucket: 'pitch-documents',
       is_restricted: false,
@@ -608,9 +625,9 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
 
     // Non-internal pitch reviews only
     await repo.listNonInternalPitchReviews(PITCH_ID);
-    expect(mock.ops[4]?.table).toBe('pitch_reviews');
-    expect(mock.ops[4]?.selectColumns).toBe(PITCH_REVIEW_SELECT_COLUMNS);
-    expect(mock.ops[4]?.filters).toContainEqual({ op: 'eq', args: ['is_internal', false] });
+    expect(mock.ops[11]?.table).toBe('pitch_reviews');
+    expect(mock.ops[11]?.selectColumns).toBe(PITCH_REVIEW_SELECT_COLUMNS);
+    expect(mock.ops[11]?.filters).toContainEqual({ op: 'eq', args: ['is_internal', false] });
   });
 
   it('derives locked/unlocked pitch & document clearance accurately and protects investment_interests note boundaries', async () => {
@@ -889,10 +906,16 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
     for (const col of splitCols(COMPANY_MEMBER_SELECT_COLUMNS)) {
       expect(migration0002).toContain(col);
     }
-    for (const col of splitCols(PITCH_SELECT_COLUMNS)) {
+    for (const col of splitCols(PITCH_INVESTOR_SELECT_COLUMNS)) {
       expect(migration0003).toContain(col);
     }
-    for (const col of splitCols(PITCH_DOCUMENT_SELECT_COLUMNS)) {
+    for (const col of splitCols(PITCH_OPERATOR_SELECT_COLUMNS)) {
+      expect(migration0003).toContain(col);
+    }
+    for (const col of splitCols(PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS)) {
+      expect(migration0003).toContain(col);
+    }
+    for (const col of splitCols(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS)) {
       expect(migration0003).toContain(col);
     }
     for (const col of splitCols(PITCH_ACCESS_GRANT_SELECT_COLUMNS)) {
@@ -924,7 +947,7 @@ describe('M5.3 Pitch, Documents, Grants, Interests & Saved Repositories (T5-12)'
 
     // Every query hook in usePitches & useSavedItems gates on isApproved
     expect(usePitchesSource.match(/enabled:\s*Boolean\(userId\)\s*&&\s*isApproved/g)?.length).toBe(
-      9,
+      12,
     );
     expect(useSavedSource.match(/enabled:\s*Boolean\(userId\)\s*&&\s*isApproved/g)?.length).toBe(2);
     expect(useSavedSource).toContain('errors.accountApprovalRequired');
@@ -1262,5 +1285,304 @@ describe('M5.3 Security Remediation — Operator Projections & Founder Notes Iso
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED', statusCode: 401 });
     expect(unauthMock.ops).toHaveLength(0);
     expect(unauthMock.rpcOps).toHaveLength(0);
+  });
+});
+
+describe('M5.3 Final Security Remediation — Pitch & Document Metadata Projections', () => {
+  const OTHER_COMPANY_ID = '22222222-2222-4222-8222-222222222202';
+  const OTHER_PITCH_ID = '33333333-3333-4333-8333-333333333302';
+
+  function buildInvestorPitchRow(overrides?: Partial<InvestorPitchRow>): InvestorPitchRow {
+    const full = buildPitchRow();
+    const {
+      rejection_reason: _r,
+      approved_by: _ab,
+      restricted_at: _ra,
+      restricted_by: _rb,
+      ...investorSafe
+    } = full;
+    return { ...investorSafe, ...overrides };
+  }
+
+  function buildInvestorDocRow(
+    overrides?: Partial<InvestorPitchDocumentRow>,
+  ): InvestorPitchDocumentRow {
+    const full = buildDocRow();
+    const {
+      uploaded_by: _ub,
+      storage_bucket: _sb,
+      storage_path: _sp,
+      restriction_reason: _rr,
+      restricted_at: _ra,
+      restricted_by: _rb,
+      scan_status: _ss,
+      ...investorSafe
+    } = full;
+    return { ...investorSafe, ...overrides };
+  }
+
+  it('prevents approved investors from receiving pitch moderation metadata on directory, detail, and public company queries', async () => {
+    const safePitch = buildInvestorPitchRow({ status: 'approved' });
+    const restrictedSafePitch = buildInvestorPitchRow({ id: OTHER_PITCH_ID, status: 'restricted' });
+
+    const investorMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      sequentialResponses: [
+        { data: [safePitch, restrictedSafePitch] }, // listAccessiblePitches
+        { data: safePitch }, // getAccessiblePitchById
+        { data: [safePitch] }, // listCompanyAccessiblePitches
+      ],
+    });
+    const repo = createPitchRepository(investorMock.pitchClient);
+
+    const feed = await repo.listAccessiblePitches({ limit: 10 });
+    const detail = await repo.getAccessiblePitchById(PITCH_ID);
+    const companyFeed = await repo.listCompanyAccessiblePitches(COMPANY_ID);
+
+    expect(feed.items).toHaveLength(2);
+    expect(detail?.id).toBe(PITCH_ID);
+    expect(companyFeed.items).toHaveLength(1);
+
+    for (const opIndex of [0, 1, 2]) {
+      const selected = investorMock.ops[opIndex]?.selectColumns ?? '';
+      expect(selected).toBe(PITCH_INVESTOR_SELECT_COLUMNS);
+      for (const modCol of ['rejection_reason', 'approved_by', 'restricted_at', 'restricted_by']) {
+        expect(selected).not.toContain(modCol);
+      }
+    }
+
+    // Preserves approved/restricted pitch filtering behavior
+    expect(investorMock.ops[0]?.filters).toContainEqual({
+      op: 'in',
+      args: ['status', ['approved', 'restricted']],
+    });
+    expect(investorMock.ops[2]?.filters).toContainEqual({
+      op: 'in',
+      args: ['status', ['approved', 'restricted']],
+    });
+  });
+
+  it('prevents approved investors from receiving document storage paths or internal moderation/scanning metadata', async () => {
+    const safeDoc = buildInvestorDocRow({ id: DOC_UUID, is_restricted: false });
+    const restrictedSafeDoc = buildInvestorDocRow({ id: DOC_RESTRICTED_UUID, is_restricted: true });
+
+    const investorMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      sequentialResponses: [{ data: [safeDoc, restrictedSafeDoc] }],
+    });
+    const repo = createPitchRepository(investorMock.pitchClient);
+
+    const docs = await repo.listPitchDocuments(PITCH_ID);
+    expect(docs).toHaveLength(2);
+    expect(investorMock.ops[0]?.selectColumns).toBe(PITCH_DOCUMENT_INVESTOR_SELECT_COLUMNS);
+    expect(investorMock.ops[0]?.filters).toContainEqual({
+      op: 'neq',
+      args: ['scan_status', 'quarantined'],
+    });
+    expect(investorMock.ops[0]?.filters).toContainEqual({ op: 'eq', args: ['is_active', true] });
+
+    for (const internalField of [
+      'storage_path',
+      'storage_bucket',
+      'restriction_reason',
+      'restricted_at',
+      'restricted_by',
+      'scan_status',
+      'uploaded_by',
+    ]) {
+      expect(investorMock.ops[0]?.selectColumns).not.toContain(internalField);
+    }
+
+    // Restricted pitch/document access state calculation continues working on investor-safe rows
+    const restrictedPitch = buildInvestorPitchRow({ status: 'restricted' });
+    const lockedSummary = derivePitchAccessState({
+      pitch: restrictedPitch,
+      documents: docs,
+      myGrants: [],
+    });
+    expect(lockedSummary.accessMode).toBe('restricted_locked');
+    expect(lockedSummary.isLocked).toBe(true);
+    expect(lockedSummary.unlockedDocumentIds.size).toBe(0);
+
+    const grantedSummary = derivePitchAccessState({
+      pitch: restrictedPitch,
+      documents: docs,
+      myGrants: [
+        {
+          id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
+          pitch_id: PITCH_ID,
+          pitch_document_id: null,
+          user_id: OTHER_USER_ID,
+          granted_by: USER_ID,
+          reason: 'Diligence grant',
+          expires_at: null,
+          revoked_at: null,
+          revoked_by: null,
+          created_at: '2026-11-20T00:00:00.000Z',
+          updated_at: '2026-11-20T00:00:00.000Z',
+        },
+      ],
+    });
+    expect(grantedSummary.accessMode).toBe('full');
+    expect(grantedSummary.isLocked).toBe(false);
+    expect(grantedSummary.unlockedDocumentIds.has(DOC_UUID)).toBe(true);
+    expect(grantedSummary.unlockedDocumentIds.has(DOC_RESTRICTED_UUID)).toBe(true);
+  });
+
+  it('allows authorized company operators (owner & active member) to retrieve moderation and internal document metadata', async () => {
+    const rejectedPitch = buildPitchRow({
+      status: 'rejected',
+      rejection_reason: 'Clarify unit economics',
+      approved_by: null,
+      restricted_at: null,
+      restricted_by: null,
+    });
+    const operatorDoc = buildDocRow({
+      storage_path: CANONICAL_PITCH_PATH,
+      restriction_reason: 'NDAs only',
+      restricted_by: OTHER_USER_ID,
+      scan_status: 'clean',
+      uploaded_by: USER_ID,
+    });
+
+    // Owner access
+    const ownerMock = createRecordingClient({
+      authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        // listCompanyPitches
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: [rejectedPitch] },
+        // getOperatedPitchById
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: rejectedPitch },
+        // listOperatedPitchDocuments
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: [operatorDoc] },
+      ],
+    });
+    const ownerRepo = createPitchRepository(ownerMock.pitchClient);
+
+    const ownerPitches = await ownerRepo.listCompanyPitches(COMPANY_ID);
+    expect(ownerPitches.items[0]?.rejection_reason).toBe('Clarify unit economics');
+    expect(ownerMock.ops[1]?.selectColumns).toBe(PITCH_OPERATOR_SELECT_COLUMNS);
+
+    const ownerPitchDetail = await ownerRepo.getOperatedPitchById(PITCH_ID);
+    expect(ownerPitchDetail?.rejection_reason).toBe('Clarify unit economics');
+    expect(ownerMock.ops[4]?.selectColumns).toBe(PITCH_OPERATOR_SELECT_COLUMNS);
+
+    const ownerDocs = await ownerRepo.listOperatedPitchDocuments(PITCH_ID);
+    expect(ownerDocs[0]?.storage_path).toBe(CANONICAL_PITCH_PATH);
+    expect(ownerDocs[0]?.scan_status).toBe('clean');
+    expect(ownerDocs[0]?.restriction_reason).toBe('NDAs only');
+    expect(ownerMock.ops[7]?.selectColumns).toBe(PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS);
+
+    // Active non-owner company_members operator access
+    const memberMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        // listCompanyPitches
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: { id: MEMBER_ID } },
+        { data: [rejectedPitch] },
+        // listOperatedPitchDocuments
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: { id: MEMBER_ID } },
+        { data: [operatorDoc] },
+      ],
+    });
+    const memberRepo = createPitchRepository(memberMock.pitchClient);
+    const memberPitches = await memberRepo.listCompanyPitches(COMPANY_ID);
+    expect(memberPitches.items[0]?.rejection_reason).toBe('Clarify unit economics');
+    const memberDocs = await memberRepo.listOperatedPitchDocuments(PITCH_ID);
+    expect(memberDocs[0]?.storage_path).toBe(CANONICAL_PITCH_PATH);
+  });
+
+  it('denies cross-company and non-operator access to operator pitch & document projections (even with stale RPC)', async () => {
+    const crossCompanyMock = createRecordingClient({
+      authUserId: USER_ID,
+      rpcResponses: { is_company_operator: { data: false } },
+      sequentialResponses: [
+        { data: { id: OTHER_PITCH_ID, company_id: OTHER_COMPANY_ID } }, // getOperatedPitchById
+        { data: { id: OTHER_PITCH_ID, company_id: OTHER_COMPANY_ID } }, // listOperatedPitchDocuments
+        { data: { id: OTHER_PITCH_ID, company_id: OTHER_COMPANY_ID } }, // transitionPitch
+        { data: { id: DOC_UUID, company_id: OTHER_COMPANY_ID } }, // updatePitchDocumentMetadata
+      ],
+    });
+    const crossRepo = createPitchRepository(crossCompanyMock.pitchClient);
+
+    await expect(crossRepo.listCompanyPitches(OTHER_COMPANY_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+    expect(await crossRepo.getOperatedPitchById(OTHER_PITCH_ID)).toBeNull();
+    await expect(crossRepo.listOperatedPitchDocuments(OTHER_PITCH_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+    await expect(
+      crossRepo.transitionPitch({ pitch_id: OTHER_PITCH_ID, next_status: 'pending' }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+    await expect(
+      crossRepo.updatePitchDocumentMetadata(DOC_UUID, { sort_order: 2 }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+    await expect(
+      crossRepo.createDraftPitch({
+        company_id: OTHER_COMPANY_ID,
+        sector_id: SECTOR_ID,
+        title_en: 'Cross Company Draft',
+        funding_stage: 'seed',
+        target_amount_usd: 500000,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+    await expect(
+      crossRepo.createPitchDocument({
+        pitch_id: OTHER_PITCH_ID,
+        company_id: OTHER_COMPANY_ID,
+        category: 'pitch_deck',
+        file_name: 'cross.pdf',
+        storage_path: `${OTHER_COMPANY_ID}/${OTHER_PITCH_ID}/${DOC_UUID}.pdf`,
+        mime_type: 'application/pdf',
+        file_size_bytes: 2048,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', statusCode: 403 });
+
+    // Stale RPC defense-in-depth: RPC returns true but caller is neither owner nor active member
+    const staleRpcMock = createRecordingClient({
+      authUserId: OTHER_USER_ID,
+      rpcResponses: { is_company_operator: { data: true } },
+      sequentialResponses: [
+        // listCompanyPitches
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: null },
+        // listOperatedPitchDocuments
+        { data: { id: PITCH_ID, company_id: COMPANY_ID } },
+        { data: { id: COMPANY_ID, owner_id: USER_ID, status: 'approved' } },
+        { data: null },
+      ],
+    });
+    const staleRepo = createPitchRepository(staleRpcMock.pitchClient);
+    await expect(staleRepo.listCompanyPitches(COMPANY_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+    await expect(staleRepo.listOperatedPitchDocuments(PITCH_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      statusCode: 403,
+    });
+
+    for (const recordedOps of [crossCompanyMock.ops, staleRpcMock.ops]) {
+      expect(
+        recordedOps.some(
+          (op) =>
+            op.selectColumns === PITCH_OPERATOR_SELECT_COLUMNS ||
+            op.selectColumns === PITCH_DOCUMENT_OPERATOR_SELECT_COLUMNS,
+        ),
+      ).toBe(false);
+    }
   });
 });

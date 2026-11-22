@@ -8,6 +8,8 @@ import {
 import type {
   CursorPageResponse,
   InvestmentInterestRow,
+  InvestorPitchDocumentRow,
+  InvestorPitchRow,
   PitchAccessGrantRow,
   PitchDocumentRow,
   PitchReviewRow,
@@ -41,10 +43,16 @@ export const pitchKeys = {
     [...pitchKeys.byUser(userId), 'list', filters ?? {}] as const,
   detail: (userId: string, pitchId: string) =>
     [...pitchKeys.byUser(userId), 'detail', pitchId] as const,
+  operatedDetail: (userId: string, pitchId: string) =>
+    [...pitchKeys.byUser(userId), 'operated-detail', pitchId] as const,
+  companyAccessibleList: (userId: string, companyId: string) =>
+    [...pitchKeys.byUser(userId), 'company-accessible', companyId] as const,
   companyList: (userId: string, companyId: string, status?: PitchStatus) =>
     [...pitchKeys.byUser(userId), 'company', companyId, status ?? 'all'] as const,
   documents: (userId: string, pitchId: string) =>
     [...pitchKeys.byUser(userId), 'documents', pitchId] as const,
+  operatedDocuments: (userId: string, pitchId: string) =>
+    [...pitchKeys.byUser(userId), 'operated-documents', pitchId] as const,
   reviews: (userId: string, pitchId: string) =>
     [...pitchKeys.byUser(userId), 'reviews', pitchId] as const,
   myGrants: (userId: string, pitchId?: string) =>
@@ -75,9 +83,9 @@ export function useAccessiblePitchesInfiniteQuery(
   const userId = user?.id ?? '';
 
   return useInfiniteQuery<
-    CursorPageResponse<PitchRow>,
+    CursorPageResponse<InvestorPitchRow>,
     Error,
-    InfiniteData<CursorPageResponse<PitchRow>>,
+    InfiniteData<CursorPageResponse<InvestorPitchRow>>,
     ReturnType<typeof pitchKeys.list>,
     string | null
   >({
@@ -98,10 +106,49 @@ export function useAccessiblePitchDetailQuery(pitchId: string | null | undefined
   const userId = user?.id ?? '';
   const safeId = pitchId?.trim() ?? '';
 
-  return useQuery<PitchRow | null>({
+  return useQuery<InvestorPitchRow | null>({
     queryKey: pitchKeys.detail(userId || 'anonymous', safeId || 'none'),
     queryFn: () => getRepo().getAccessiblePitchById(safeId),
     enabled: Boolean(userId) && isApproved && safeId.length > 0,
+  });
+}
+
+export function useOperatedPitchDetailQuery(pitchId: string | null | undefined) {
+  const { user, isApproved } = useAuth();
+  const userId = user?.id ?? '';
+  const safeId = pitchId?.trim() ?? '';
+
+  return useQuery<PitchRow | null>({
+    queryKey: pitchKeys.operatedDetail(userId || 'anonymous', safeId || 'none'),
+    queryFn: () => getRepo().getOperatedPitchById(safeId),
+    enabled: Boolean(userId) && isApproved && safeId.length > 0,
+  });
+}
+
+export function useCompanyAccessiblePitchesInfiniteQuery(
+  companyId: string | null | undefined,
+  limit = 20,
+) {
+  const { user, isApproved } = useAuth();
+  const userId = user?.id ?? '';
+  const safeCompanyId = companyId?.trim() ?? '';
+
+  return useInfiniteQuery<
+    CursorPageResponse<InvestorPitchRow>,
+    Error,
+    InfiniteData<CursorPageResponse<InvestorPitchRow>>,
+    ReturnType<typeof pitchKeys.companyAccessibleList>,
+    string | null
+  >({
+    queryKey: pitchKeys.companyAccessibleList(userId || 'anonymous', safeCompanyId || 'none'),
+    initialPageParam: null,
+    queryFn: ({ pageParam }) =>
+      getRepo().listCompanyAccessiblePitches(safeCompanyId, {
+        cursor: pageParam,
+        limit,
+      }),
+    getNextPageParam: (lastPage) => (lastPage.hasNextPage ? lastPage.nextCursor : undefined),
+    enabled: Boolean(userId) && isApproved && safeCompanyId.length > 0,
   });
 }
 
@@ -139,9 +186,21 @@ export function usePitchDocumentsQuery(pitchId: string | null | undefined, limit
   const userId = user?.id ?? '';
   const safePitchId = pitchId?.trim() ?? '';
 
-  return useQuery<readonly PitchDocumentRow[]>({
+  return useQuery<readonly InvestorPitchDocumentRow[]>({
     queryKey: pitchKeys.documents(userId || 'anonymous', safePitchId || 'none'),
     queryFn: () => getRepo().listPitchDocuments(safePitchId, limit),
+    enabled: Boolean(userId) && isApproved && safePitchId.length > 0,
+  });
+}
+
+export function useOperatedPitchDocumentsQuery(pitchId: string | null | undefined, limit = 50) {
+  const { user, isApproved } = useAuth();
+  const userId = user?.id ?? '';
+  const safePitchId = pitchId?.trim() ?? '';
+
+  return useQuery<readonly PitchDocumentRow[]>({
+    queryKey: pitchKeys.operatedDocuments(userId || 'anonymous', safePitchId || 'none'),
+    queryFn: () => getRepo().listOperatedPitchDocuments(safePitchId, limit),
     enabled: Boolean(userId) && isApproved && safePitchId.length > 0,
   });
 }
