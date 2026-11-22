@@ -2,11 +2,13 @@ import { z } from 'zod';
 import {
   ADMIN_PERMISSION_SCOPES,
   ADMIN_ROLE_NAMES,
+  DEVICE_PLATFORMS,
   NOTIFICATION_CATEGORIES,
   SUPPORT_REQUEST_CATEGORIES,
   USER_ROLES,
 } from '@shark/shared-types';
 import {
+  appLocaleSchema,
   boundedTextSchema,
   safeRelativeDeepLinkSchema,
   slugSchema,
@@ -214,3 +216,35 @@ export const createSupportRequestSchema = z
     message: boundedTextSchema(10, 4000, 'validation.support.message'),
   })
   .strict();
+
+export const EXPO_PUSH_TOKEN_REGEX = /^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/;
+
+export const expoPushTokenSchema = z
+  .string()
+  .trim()
+  .min(20, 'validation.deviceToken.invalid')
+  .max(255, 'validation.deviceToken.invalid')
+  .regex(EXPO_PUSH_TOKEN_REGEX, 'validation.deviceToken.invalid');
+
+export const registerDeviceTokenSchema = z
+  .object({
+    expo_push_token: expoPushTokenSchema,
+    platform: z.enum(DEVICE_PLATFORMS),
+    device_id: boundedTextSchema(1, 128, 'validation.deviceToken.deviceId').nullable().optional(),
+    app_version: boundedTextSchema(1, 40, 'validation.deviceToken.appVersion')
+      .nullable()
+      .optional(),
+    locale: appLocaleSchema.default('ar'),
+  })
+  .strict();
+
+export const strictNotificationDeepLinkSchema = safeRelativeDeepLinkSchema.refine(
+  (val) =>
+    !val.includes('\\') &&
+    !val.includes(':') &&
+    !val.includes('?') &&
+    !val.includes('#') &&
+    !/%2e|%2f|%5c/i.test(val) &&
+    /^\/(?:[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*)?$/.test(val),
+  'validation.deepLink.invalidRelativePath',
+);

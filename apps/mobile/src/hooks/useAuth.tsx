@@ -20,6 +20,10 @@ import type {
 } from '@shark/shared-types';
 import { createAuthRepository } from '@/repositories/auth.repository';
 import { mobileAnalytics } from '@/services/analytics';
+import {
+  bestEffortDeactivatePushTokensOnSignOut,
+  setActiveRegisteredPushToken,
+} from '@/services/notifications';
 import { setSentryUserId } from '@/services/sentry';
 import { registerRevokedAccessHandler, type RevokedAccessReason } from '@/services/service-client';
 import { getMobileSupabaseClient, tryGetMobileSupabaseClient } from '@/services/supabase';
@@ -237,7 +241,10 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
     await mobileAnalytics.reset();
     const client = tryGetMobileSupabaseClient();
     if (client) {
+      await bestEffortDeactivatePushTokensOnSignOut(client);
       await createAuthRepository(client).signOut();
+    } else {
+      setActiveRegisteredPushToken(null);
     }
     const guest = createInitialGuestAuthState({ status: 'guest' });
     statusRef.current = guest.status;
@@ -248,6 +255,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
     async (input: DeleteOwnAccountRequest): Promise<void> => {
       await createAuthRepository(getMobileSupabaseClient()).deleteOwnAccount(input);
       queryClient.clear();
+      setActiveRegisteredPushToken(null);
       setSentryUserId(null);
       await mobileAnalytics.reset();
       const guest = createInitialGuestAuthState({ status: 'guest' });

@@ -213,6 +213,17 @@
     "deleteAccount": {
       "phrase": "Please type DELETE exactly to confirm account deletion."
     },
+    "deviceToken": {
+      "appVersion": {
+        "tooLong": "App version exceeds the maximum allowed length.",
+        "tooShort": "App version is invalid."
+      },
+      "deviceId": {
+        "tooLong": "Device identifier exceeds the maximum allowed length.",
+        "tooShort": "Device identifier is invalid."
+      },
+      "invalid": "Invalid Expo push notification token format."
+    },
     "description": {
       "tooShort": "Description is too short.",
       "tooLong": "Description exceeds the maximum allowed length."
