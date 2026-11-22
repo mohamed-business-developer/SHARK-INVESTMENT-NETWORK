@@ -548,4 +548,146 @@ describe('T5-14 Signed URL Service & Auto-Refresh Lifecycle (P5-I05 / P5-S03 pre
 
     controller.dispose();
   });
+
+  it('independently clears cached URL, viewer state, and cancels all refresh/expiry timers on HTTP 429 rate limiting', async () => {
+    vi.useFakeTimers();
+    const baseTime = Date.parse('2026-11-22T12:00:00.000Z');
+    vi.setSystemTime(baseTime);
+
+    let callIndex = 0;
+    const edgeMock = createEdgeMockClient({
+      authUserId: USER_ID,
+      invokeImpl: async () => {
+        callIndex += 1;
+        if (callIndex === 1) {
+          return {
+            data: {
+              signedUrl:
+                'https://demo.supabase.co/storage/v1/object/sign/pitch-documents/deck.pdf?token=active429',
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              ttlSeconds: 60,
+              contentType: 'application/pdf',
+              fileName: 'deck.pdf',
+            },
+            error: null,
+          };
+        }
+        return {
+          data: null,
+          error: makeEdgeHttpError(429, 'RATE_LIMITED', 'errors.rateLimited'),
+        };
+      },
+    });
+
+    const controller = createSignedUrlController({
+      fetchSignedUrl: (req) => requestSignedDocumentUrl(edgeMock.client, req, Date.now()),
+    });
+    const viewerSnapshots: Array<ReturnType<typeof controller.getState>> = [];
+    const unsubscribe = controller.subscribe((next) => viewerSnapshots.push(next));
+
+    controller.setTarget({ bucket: 'pitch-documents', documentId: DOC_ID, enabled: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(controller.getState().status).toBe('ready');
+    expect(controller.getState().data?.signedUrl).toContain('token=active429');
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    // Trigger scheduled proactive refresh at expiresAt - 10s -> server replies HTTP 429
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(edgeMock.invokeCalls).toHaveLength(2);
+    expect(controller.getState().status).toBe('locked');
+    expect(controller.getState().isLocked).toBe(true);
+    expect(controller.getState().data).toBeNull();
+    expect(controller.getState().error).toMatchObject({
+      code: 'RATE_LIMITED',
+      messageKey: 'errors.rateLimited',
+      statusCode: 429,
+    });
+
+    // Viewer subscriber immediately received cleared data and locked state, and ALL timers are cancelled
+    const lastViewerState = viewerSnapshots[viewerSnapshots.length - 1];
+    expect(lastViewerState?.status).toBe('locked');
+    expect(lastViewerState?.data).toBeNull();
+    expect(lastViewerState?.isLocked).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Foreground resume or long idle wait does NOT trigger hidden retries once locked by 429
+    controller.setActive(false);
+    controller.setActive(true);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(edgeMock.invokeCalls).toHaveLength(2);
+
+    unsubscribe();
+    controller.dispose();
+  });
+
+  it('independently clears cached URL, viewer state, and cancels all refresh/expiry timers on DOCUMENT_QUARANTINED (403)', async () => {
+    vi.useFakeTimers();
+    const baseTime = Date.parse('2026-11-22T12:00:00.000Z');
+    vi.setSystemTime(baseTime);
+
+    let callIndex = 0;
+    const edgeMock = createEdgeMockClient({
+      authUserId: USER_ID,
+      invokeImpl: async () => {
+        callIndex += 1;
+        if (callIndex === 1) {
+          return {
+            data: {
+              signedUrl:
+                'https://demo.supabase.co/storage/v1/object/sign/pitch-documents/deck.pdf?token=activeQuarantine',
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              ttlSeconds: 60,
+              contentType: 'application/pdf',
+              fileName: 'deck.pdf',
+            },
+            error: null,
+          };
+        }
+        return {
+          data: null,
+          error: makeEdgeHttpError(403, 'DOCUMENT_QUARANTINED', 'errors.documentQuarantined'),
+        };
+      },
+    });
+
+    const controller = createSignedUrlController({
+      fetchSignedUrl: (req) => requestSignedDocumentUrl(edgeMock.client, req, Date.now()),
+    });
+    const viewerSnapshots: Array<ReturnType<typeof controller.getState>> = [];
+    const unsubscribe = controller.subscribe((next) => viewerSnapshots.push(next));
+
+    controller.setTarget({ bucket: 'pitch-documents', documentId: DOC_ID, enabled: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(controller.getState().status).toBe('ready');
+    expect(controller.getState().data?.signedUrl).toContain('token=activeQuarantine');
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    // Trigger scheduled proactive refresh -> backend marks document quarantined (403)
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(edgeMock.invokeCalls).toHaveLength(2);
+    expect(controller.getState().status).toBe('locked');
+    expect(controller.getState().isLocked).toBe(true);
+    expect(controller.getState().data).toBeNull();
+    expect(controller.getState().error).toMatchObject({
+      code: 'DOCUMENT_QUARANTINED',
+      messageKey: 'errors.documentQuarantined',
+      statusCode: 403,
+    });
+
+    const lastViewerState = viewerSnapshots[viewerSnapshots.length - 1];
+    expect(lastViewerState?.status).toBe('locked');
+    expect(lastViewerState?.data).toBeNull();
+    expect(lastViewerState?.isLocked).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+
+    controller.setActive(false);
+    controller.setActive(true);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(edgeMock.invokeCalls).toHaveLength(2);
+
+    unsubscribe();
+    controller.dispose();
+  });
 });
