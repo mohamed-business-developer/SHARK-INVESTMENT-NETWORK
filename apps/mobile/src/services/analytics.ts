@@ -1,21 +1,57 @@
+import PostHog from 'posthog-react-native';
+import {
+  buildPostHogEuOptions,
+  createAnalyticsService,
+  scrubPostHogBeforeSend,
+  type AnalyticsClient,
+  type AnalyticsConsentState,
+  type AnalyticsDriver,
+  type CreateAnalyticsServiceOptions,
+} from './analytics-core';
 import { mobileEnv } from './env';
 
-/**
- * Privacy-hardened PostHog analytics stub (Phase 2).
- * Full opt-in client initialization with autocapture disabled lands in Phase 5 (P5-10).
- */
-export interface AnalyticsClient {
-  readonly isConfigured: boolean;
-  trackEvent: (name: string, properties?: Record<string, string | number | boolean>) => void;
-}
+export {
+  buildPostHogEuOptions,
+  createAnalyticsService,
+  scrubPostHogBeforeSend,
+  type AnalyticsClient,
+  type AnalyticsConsentState,
+  type AnalyticsDriver,
+  type CreateAnalyticsServiceOptions,
+};
 
-export function createAnalyticsStub(): AnalyticsClient {
-  const isConfigured = Boolean(mobileEnv.EXPO_PUBLIC_POSTHOG_API_KEY);
+function createDefaultPostHogDriver(config: {
+  readonly apiKey: string;
+  readonly host: string;
+}): AnalyticsDriver {
+  const phOptions = buildPostHogEuOptions(config.host);
+  const client = new PostHog(config.apiKey, phOptions as ConstructorParameters<typeof PostHog>[1]);
 
   return {
-    isConfigured,
-    trackEvent: () => {
-      // No-op stub in Phase 2 foundation shell; Phase 5 wires opt-in PostHog EU ingestion.
+    optIn: () => client.optIn(),
+    optOut: () => client.optOut(),
+    identify: (distinctId: string) => {
+      client.identify(distinctId);
     },
+    capture: (eventName: string, properties) => {
+      client.capture(eventName, properties);
+    },
+    screen: (screenName: string, properties) => {
+      void client.screen(screenName, properties);
+    },
+    reset: () => {
+      client.reset();
+    },
+    shutdown: () => client.shutdown(),
   };
+}
+
+export const mobileAnalytics: AnalyticsClient = createAnalyticsService({
+  apiKey: mobileEnv.EXPO_PUBLIC_POSTHOG_API_KEY,
+  host: mobileEnv.EXPO_PUBLIC_POSTHOG_HOST,
+  createDriver: createDefaultPostHogDriver,
+});
+
+export function createAnalyticsStub(): AnalyticsClient {
+  return createAnalyticsService();
 }

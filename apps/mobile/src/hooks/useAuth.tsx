@@ -19,6 +19,8 @@ import type {
   SelectAccountRoleRequest,
 } from '@shark/shared-types';
 import { createAuthRepository } from '@/repositories/auth.repository';
+import { mobileAnalytics } from '@/services/analytics';
+import { setSentryUserId } from '@/services/sentry';
 import { registerRevokedAccessHandler, type RevokedAccessReason } from '@/services/service-client';
 import { getMobileSupabaseClient, tryGetMobileSupabaseClient } from '@/services/supabase';
 import {
@@ -145,6 +147,27 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
   }, [queryClient, refreshAuthState]);
 
   const userId = authState.user?.id ?? null;
+  const profileId = authState.profile?.id ?? null;
+  const analyticsOptIn = authState.profile?.analytics_opt_in === true;
+
+  useEffect(() => {
+    if (
+      authState.status === 'guest' ||
+      authState.status === 'loading' ||
+      authState.status === 'suspended' ||
+      !profileId
+    ) {
+      setSentryUserId(null);
+      void mobileAnalytics.syncConsent({ enabled: false, userId: null });
+      return;
+    }
+
+    setSentryUserId(profileId);
+    void mobileAnalytics.syncConsent({
+      enabled: analyticsOptIn,
+      userId: profileId,
+    });
+  }, [analyticsOptIn, authState.status, profileId]);
 
   useEffect(() => {
     if (!userId) {
@@ -210,6 +233,8 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
 
   const signOut = useCallback(async (): Promise<void> => {
     queryClient.clear();
+    setSentryUserId(null);
+    await mobileAnalytics.reset();
     const client = tryGetMobileSupabaseClient();
     if (client) {
       await createAuthRepository(client).signOut();
@@ -223,6 +248,8 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
     async (input: DeleteOwnAccountRequest): Promise<void> => {
       await createAuthRepository(getMobileSupabaseClient()).deleteOwnAccount(input);
       queryClient.clear();
+      setSentryUserId(null);
+      await mobileAnalytics.reset();
       const guest = createInitialGuestAuthState({ status: 'guest' });
       statusRef.current = guest.status;
       setAuthState(guest);
