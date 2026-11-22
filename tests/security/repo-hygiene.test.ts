@@ -223,6 +223,28 @@ describe('P5-U04 Repository, Service & Hook Security Hygiene', () => {
         /from\(\s*['"](?:pitch-documents|verification-documents)['"]\s*\)\.(?:getPublicUrl|createSignedUrl|upload)/,
       );
     }
+
+    for (const signedFile of [
+      resolve(REPO_ROOT, 'apps/mobile/src/services/signed-urls.ts'),
+      resolve(REPO_ROOT, 'apps/mobile/src/hooks/useSignedDocumentUrl.ts'),
+    ]) {
+      const content = readFileSync(signedFile, 'utf8');
+      expect(content).not.toMatch(/\.(?:getPublicUrl|createSignedUrl)\s*\(/);
+      expect(content).not.toMatch(
+        /\.from\(\s*['"](?:pitch-documents|verification-documents)['"]\s*\)/,
+      );
+      expect(content).not.toMatch(
+        /AsyncStorage|SecureStore|localStorage|sessionStorage|FileSystem\.writeAsStringAsync/,
+      );
+      expect(content).not.toMatch(/console\.(log|info|warn|error)|Sentry\.|captureMessage/);
+    }
+
+    const signedUrlsSource = readFileSync(
+      resolve(REPO_ROOT, 'apps/mobile/src/services/signed-urls.ts'),
+      'utf8',
+    );
+    expect(signedUrlsSource).toContain('staleTime: 0');
+    expect(signedUrlsSource).toContain('gcTime: 0');
   });
 
   it('keeps public discovery & search hooks strictly free of pitches and private raw tables', () => {
